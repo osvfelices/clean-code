@@ -327,6 +327,16 @@ def test_too_many_arguments_and_flag_argument():
     assert "flag-argument" not in rules_for("opts.ts", options)
 
 
+def test_prose_may_quote_a_setting_it_does_not_change():
+    doc = {"tool_name": "Write", "tool_input": {"file_path": "README.md",
+           "content": 'Set `"strict": false` only when you mean it, and `"disableRules": []` by default.'}}
+    assert cc.pre_check(doc, ROOT) is None
+    cfg = {"tool_name": "Write", "tool_input": {"file_path": "tsconfig.json", "content": '{"strict": false}'}}
+    assert cc.pre_check(cfg, ROOT)
+    src = {"tool_name": "Edit", "tool_input": {"file_path": "a.ts", "old_string": "x", "new_string": "// eslint-disable"}}
+    assert cc.pre_check(src, ROOT)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

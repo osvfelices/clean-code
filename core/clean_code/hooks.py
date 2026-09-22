@@ -44,6 +44,7 @@ WEAKENING = [
 ]
 
 
+PROSE = {".md", ".mdx", ".txt", ".rst", ".adoc"}
 PROTECTED = ["**/.clean-code.json", "**/clean_check.py", "**/clean_code/*.py", "**/.clean-code/**", "**/.husky/**", "**/.pre-commit-config.yaml"]
 
 
@@ -111,7 +112,8 @@ def pre_check(payload: dict, root: Path) -> str | None:
     for path, olds, news in edit_targets(payload):
         if path.name and matches_any(path, PROTECTED, root):
             return f"Blocked: {path.name} protects code quality. Ask the user before changing it."
-        for text in news:
+        # Prose can quote a setting without turning it off.
+        for text in ([] if path.suffix in PROSE else news):
             for pattern, why in WEAKENING:
                 if text and re.search(pattern, text):
                     return f"Blocked: this edit {why}. Fix the underlying issue; if the rule is wrong, ask the user."

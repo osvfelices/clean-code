@@ -9,9 +9,9 @@ lands in the agent's context and stays there.
 
 | | before | after |
 |---|---|---|
-| mean output per edit | 228 b | 3 b |
+| mean output per edit | 228 b | 2.2 b |
 | median output per edit | 219 b | 0 b |
-| edits producing nothing | 13% | 97% |
+| edits producing nothing | 13% | 96% |
 
 125 edits simulated across VS Code, the Python standard library and a production TypeScript repo.
 Reproduce with `python3 core/tests/bench.py`, which fails above 25 bytes per edit.
@@ -42,7 +42,7 @@ carry 90 TODO markers and 83 decorative banners.
 
 ## What the fixes were
 
-Nine changes, each traced to a false positive found in one of the three corpora.
+Each change is traced to a false positive found in one of the corpora, never to an opinion.
 
 1. Post mode reports only lines the edit introduced. 98% of what it used to print was inherited.
 2. A license notice is not a section banner. It was telling VS Code to delete its MIT header.
@@ -64,3 +64,17 @@ precision with a per-project allowlist is not a fix.
 - VS Code's `src`, from a clone of `microsoft/vscode` at a pinned commit
 - the CPython standard library of the Python being tested
 - any working TypeScript repo, for domain vocabulary the first two lack
+
+## Later rounds
+
+| Change | Measured effect |
+| --- | --- |
+| Generated files skipped | Go sample corpus 100% of files flagged to 0% |
+| Prose is not commented-out code | Ruby doc comments opening with `return` stopped firing |
+| Ordinals are not task labels | `phase-label` 990 hits to 141 on a Next.js product, the rest real |
+| Conditional skips are platform guards | `skipped-test` 277 of 1852 standard library files to 23 |
+| License notices exempt from shouting | a BSD warranty disclaimer stopped reading as raised voice |
+| Rules became data | a typo in `disableRules` is reported; TypeScript rules stopped running on Go |
+| Split into modules | byte identical output across three corpora, 590, 956 and 406 hits before and after |
+| Structure rules on tree-sitter | 0.8 ms per file, 0.1 findings per file on a React product |
+| Prose exempt from the weakening guard | a README may quote a setting it does not change |
