@@ -1,0 +1,4 @@
+{
+  "allowConsole": ["core/clean_check.py", "core/tests/*.py"],
+  "ignore": ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.next/**", "**/vendor/**", "**/*.d.ts", "**/*.min.js", "core/tests/test_clean_check.py"]
+}

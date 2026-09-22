@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Clean Code enforcement hooks for Claude Code and Codex CLI.
 
-Modes:
-  post   read PostToolUse JSON on stdin, check the edited file, exit 2 on violations
-  pre    read PreToolUse JSON on stdin, block edits/commands that weaken safeties
-  files  check the given paths (CLI / CI use), exit 1 on violations
+Modes post and pre read hook JSON on stdin and exit 2 to block; files checks paths for CLI and CI.
+Single-rule precision is pinned by core/tests/test_clean_check.py, the aggregate by core/tests/bench.py.
 """
 from __future__ import annotations
 

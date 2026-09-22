@@ -195,6 +195,45 @@ def test_malformed_config_is_reported_not_swallowed():
     assert "ignoring malformed" in proc.stderr, proc.stderr
 
 
+DEFECTS = [
+    ("ts", "const a = b as any;", "loose type"),
+    ("ts", "console.log('debug');", "debug output"),
+    ("ts", "const v = maybe!.value;", "assertion"),
+    ("ts", "// @ts-ignore", "silenced"),
+    ("ts", "// TODO: fix later", "TODO"),
+    ("ts", "// Added validation here", "narrat"),
+    ("ts", "// NEVER call this directly", "CAPS"),
+    ("ts", "// const dead: number = 1;", "commented-out"),
+    ("ts", 'const apiKey = "sk_live_abcdefghijklmnop";', "secret"),
+    ("ts", "it.skip('x', () => {});", "test"),
+    ("py", "except ValueError:\n    pass", "empty catch"),
+]
+
+
+def test_recall_on_the_edited_line():
+    """Scoping must never hide a defect the edit itself introduced."""
+    box = Path(tempfile.mkdtemp())
+    for i, (ext, bad, needle) in enumerate(DEFECTS):
+        host = "\n".join(f"v{j} = {j}" if ext == "py" else f"export const v{j}: number = {j};" for j in range(300))
+        path = box / f"host{i}.{ext}"
+        path.write_text(host + "\n" + bad + "\n")
+        payload = {"session_id": f"recall{i}", "tool_input": {"file_path": str(path), "old_string": "absent", "new_string": bad}}
+        proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+                              capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"})
+        assert needle.lower() in proc.stderr.lower(), f"{bad!r} went unreported: {proc.stderr!r}"
+
+
+def test_autofixable_defect_is_removed_rather_than_reported():
+    box = Path(tempfile.mkdtemp())
+    path = box / "banner.ts"
+    path.write_text("export const a: number = 1;\n// ---------- section ----------\n")
+    payload = {"session_id": "autofix1", "tool_input": {"file_path": str(path), "old_string": "absent", "new_string": "// ---------- section ----------"}}
+    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+                          capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"})
+    assert proc.returncode == 0 and proc.stderr == ""
+    assert "----" not in path.read_text()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
