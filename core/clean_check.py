@@ -331,7 +331,7 @@ def rule_comment_shouting(src: Source, cfg: Config, root: Path) -> Violation | N
 
 
 def rule_phase_label(src: Source, cfg: Config, root: Path) -> Violation | None:
-    hits = grep_comments(src, r"\b(phase|step|task|sprint|ticket|milestone|iteration)\s*[A-Z]?\d+[A-Z0-9]*\b|\b[A-Z]\d{1,3}[A-Z]?\b(?=\s+\w*(import|cutover|migrat|ingest|rollout|stage|flow|materializ))|\bper (the|our|my) (plan|prompt|conversation|spec)\b")
+    hits = grep_comments(src, r"\b(phase|step|task|sprint|ticket|milestone|iteration)\s*[A-Z]?\d+[A-Z0-9]+\b|\b[A-Z]\d{1,3}[A-Z]?\b(?=\s+\w*(import|cutover|migrat|ingest|rollout|stage|flow|materializ))|\bper (the|our|my) (plan|prompt|conversation|spec)\b")
     return Violation("phase-label", "Task, phase or prompt label in a comment. That is the conversation's context, not the code's. Remove it.", hits) if hits else None
 
 

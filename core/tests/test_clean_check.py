@@ -64,6 +64,8 @@ def test_comment_form_rules():
     assert "comment-shouting" not in rules_for("w2.ts", "// derives the UPC and ISRC server-side\nconst a: number = 1;\n")
     assert "phase-label" in rules_for("x.ts", "// Thin Server Actions for Phase 3B3A distributor cutover.\nconst a: number = 1;\n")
     assert "phase-label" in rules_for("x2.ts", "// F50 imported-asset materialization\nconst a: number = 1;\n")
+    assert "phase-label" not in rules_for("x3.tsx", "// Step 1 fields stay required until the album is complete\nconst a: number = 1;\n")
+    assert "phase-label" not in rules_for("x4.tsx", "// Phase 0 of the scroll timeline runs from 0.1 to 0.38\nconst a: number = 1;\n")
     header = "/**\n" + "".join(f" * line {i} of a long essay about the module\n" for i in range(7)) + " */\nconst a: number = 1;\n"
     assert "header-essay" in rules_for("y.ts", header)
     short = "/**\n * Owns catalog ingestion commands.\n * Byte upload lives in the API route, not here.\n */\nconst a: number = 1;\n"
