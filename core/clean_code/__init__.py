@@ -7,6 +7,6 @@ from .hooks import edit_targets, edited_lines, patch_sections, pre_check
 from .report import autofix, format_report
 from .rules import BY_ID, RULES, Rule, Violation, check_file, is_generated, shouts
 from .source import Comment, Source, hit, line_of, load_source, split_comments
-from . import ast_rules
+from . import ast_rules, boundary
 
 __all__ = [name for name in dir() if not name.startswith("_")]

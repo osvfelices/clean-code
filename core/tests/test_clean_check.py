@@ -421,6 +421,51 @@ def test_installer_merges_and_removes_only_its_own_hooks():
     assert not (home / ".claude/skills/clean-code").exists()
 
 
+def next_like_project() -> Path:
+    """A client, a lib that reaches a driver, and a server action, which is the shape that misleads."""
+    box = Path(tempfile.mkdtemp())
+    (box / "lib").mkdir()
+    (box / "actions").mkdir()
+    (box / "components").mkdir()
+    (box / "lib/redis.ts").write_text('import Redis from "ioredis";\nexport const redis = new Redis();\n')
+    (box / "lib/presence.ts").write_text('import { redis } from "./redis";\nexport const TTL_MS = 300000;\nexport type Presence = { at: number };\n')
+    (box / "actions/read.ts").write_text('"use server";\nimport { redis } from "../lib/redis";\nexport async function read() { return redis.keys("x"); }\n')
+    return box
+
+
+def boundary_rules(box: Path, body: str) -> set[str]:
+    path = box / "components/panel.tsx"
+    path.write_text(body)
+    return {v.rule for v in cc.check_file(path, cc.Config.load(box), box)}
+
+
+def test_a_client_may_not_reach_a_server_only_package():
+    box = next_like_project()
+    two_hops = '"use client";\nimport { TTL_MS } from "../lib/presence";\nexport function P() { return TTL_MS; }\n'
+    assert "client-bundles-server-code" in boundary_rules(box, two_hops), "two hops is the real shape"
+
+    direct = '"use client";\nimport Redis from "ioredis";\nexport function P() { return Redis; }\n'
+    assert "client-bundles-server-code" in boundary_rules(box, direct)
+
+
+def test_the_boundary_rule_leaves_correct_code_alone():
+    box = next_like_project()
+    typed = '"use client";\nimport type { Presence } from "../lib/presence";\nexport function P(x: Presence) { return x; }\n'
+    assert "client-bundles-server-code" not in boundary_rules(box, typed), "a type import is erased"
+
+    action = '"use client";\nimport { read } from "../actions/read";\nexport function P() { return read; }\n'
+    assert "client-bundles-server-code" not in boundary_rules(box, action), "a server action is an RPC boundary"
+
+    plain = '"use client";\nimport { useState } from "react";\nexport function P() { return useState(0); }\n'
+    assert "client-bundles-server-code" not in boundary_rules(box, plain)
+
+    server = '"use server";\nimport { redis } from "../lib/redis";\nexport async function go() { return redis; }\n'
+    path = box / "actions/other.ts"
+    path.write_text(server)
+    assert "client-bundles-server-code" not in {v.rule for v in cc.check_file(path, cc.Config.load(box), box)}, \
+        "a server module may import whatever it likes"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

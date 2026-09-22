@@ -74,6 +74,7 @@ Eighteen by default. Two more register when tree-sitter is importable.
 | **Comments** | `narration-comment` `banner-comment` `closing-brace-comment` `redundant-docstring` `comment-typography` `comment-shouting` `phase-label` `header-essay` `comment-density` |
 | **Safety** | `suppressed-check` `weak-type` `non-null-assertion` `swallowed-error` `skipped-test` `hardcoded-secret` |
 | **Structure** | `too-many-arguments` `flag-argument` |
+| **Boundaries** | `client-bundles-server-code` |
 
 ```
 $ clean-code explain flag-argument
@@ -107,6 +108,18 @@ React product. It counts what a caller must pass, so a defaulted or rest paramet
 that distinction alone removed 41 of 71 findings in the standard library, where keyword arguments
 are the idiom. `flag-argument` leaves a one-parameter setter alone, because it takes the value it
 sets, and an options object alone, because that is the refactor the rule is asking for.
+
+## The boundary rule
+
+One rule reads past the file it is given, because the defect it looks for is not in any single file:
+a client module that pulls a runtime value from a module that reaches a Node-only package. The
+bundle fails at build time, after types, tests and lint have all passed.
+
+It walks value imports two hops out, skipping `import type` and any module marked `"use server"`,
+which is an RPC boundary rather than a bundle edge. Two hops is measured, not chosen: one hop misses
+the real shape, where a client imports a lib that imports the driver, and three finds nothing more
+on a 696 file corpus. Zero false positives there, and it costs 0.96 ms on a client file and a single
+comparison on everything else.
 
 ## Configuration
 

@@ -78,3 +78,4 @@ precision with a per-project allowlist is not a fix.
 | Split into modules | byte identical output across three corpora, 590, 956 and 406 hits before and after |
 | Structure rules on tree-sitter | 0.8 ms per file, 0.1 findings per file on a React product |
 | Prose exempt from the weakening guard | a README may quote a setting it does not change |
+| Client to server boundary | 0 findings on 696 real client modules, catches the two-hop bug that broke a build |
