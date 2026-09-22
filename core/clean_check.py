@@ -325,6 +325,8 @@ def rule_comment_typography(src: Source, cfg: Config, root: Path) -> Violation |
 def rule_comment_shouting(src: Source, cfg: Config, root: Path) -> Violation | None:
     hits = []
     for c in src.comments:
+        if LICENSE_NOTICE.search(c.text):
+            continue
         for k, l in enumerate(c.text.split("\n")):
             if shouts(l):
                 hits.append(hit(src, c.line + k)); break

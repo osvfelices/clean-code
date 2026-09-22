@@ -165,6 +165,8 @@ def test_shouting_is_emphasis_not_identifiers():
     assert "comment-shouting" not in rules_for("sql.ts", "// one UNION ALL over the sources\nconst a: number = 1;\n")
     assert "comment-shouting" not in rules_for("sql2.ts", "// columns are optional and SET NULL on delete\nconst a: number = 1;\n")
     assert "comment-shouting" not in rules_for("hyph.ts", "// READ-ONLY view of the ledger\nconst a: number = 1;\n")
+    bsd = "/*\n * Copyright (c) 2026 Acme.\n * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n * AS IS AND ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.\n */\nconst a: number = 1;\n"
+    assert "comment-shouting" not in rules_for("bsd.ts", bsd)
     assert "comment-shouting" in rules_for("emph.ts", "// NEVER call this from a worker\nconst a: number = 1;\n")
     assert "comment-shouting" in rules_for("emph2.ts", "// this MUST stay in sync with the schema\nconst a: number = 1;\n")
 
