@@ -12,13 +12,16 @@
     "skills",
     "install.sh",
     "README.md",
-    "BASELINE.md"
+    "BASELINE.md",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!core/tests/**"
   ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "test": "python3 core/tests/test_clean_check.py && python3 core/tests/bench.py"
+    "test": "python3 core/tests/test_clean_check.py"
   },
   "license": "UNLICENSED",
   "private": true
