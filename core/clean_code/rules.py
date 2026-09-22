@@ -68,11 +68,14 @@ class Rule:
 
 
 RULES: list[Rule] = []
+BY_ID: dict[str, Rule] = {}
 
 
 def rule(id: str, label: str, message: str, languages: frozenset[str] | None = None, whole_file: bool = False):
     def register(check):
-        RULES.append(Rule(id, label, message, check, languages, whole_file))
+        entry = Rule(id, label, message, check, languages, whole_file)
+        RULES.append(entry)
+        BY_ID[id] = entry
         return check
     return register
 
@@ -259,9 +262,6 @@ def _header_essay(src, cfg, root):
         if len(body) > 4:
             return [hit(src, c.line)]
     return []
-
-
-BY_ID = {r.id: r for r in RULES}
 
 
 def is_generated(src: Source) -> bool:

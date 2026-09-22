@@ -23,6 +23,7 @@ class Source:
     lines: list[str]
     code_lines: list[str]
     comments: list[Comment]
+    tree: object | None = None
 
 
 def split_comments(text: str, ext: str) -> tuple[list[str], list[Comment]]:

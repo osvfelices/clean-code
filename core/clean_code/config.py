@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
     "allowTodo": False,
     "disableRules": [],
     "maxCommentRatio": 0.25,
+    "maxArguments": 5,
 }
 
 
@@ -38,6 +39,7 @@ class Config:
     allow_todo: bool
     disabled: set[str]
     max_comment_ratio: float
+    max_arguments: int
 
     @staticmethod
     def load(root: Path) -> "Config":
@@ -54,6 +56,7 @@ class Config:
             allow_todo=bool(data["allowTodo"]),
             disabled=set(data["disableRules"]),
             max_comment_ratio=float(data["maxCommentRatio"]),
+            max_arguments=int(data["maxArguments"]),
         )
 
 

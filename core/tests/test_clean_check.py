@@ -305,6 +305,28 @@ def test_rules_and_explain_are_queryable():
     assert bad.returncode == 1
 
 
+def test_ast_rules_register_only_when_tree_sitter_is_present():
+    from clean_code import ast_rules
+    ast_ids = {"too-many-arguments", "flag-argument"}
+    registered = ast_ids & set(cc.BY_ID)
+    assert registered == (ast_ids if ast_rules.AVAILABLE else set())
+
+
+def test_too_many_arguments_and_flag_argument():
+    if not __import__("clean_code.ast_rules", fromlist=["AVAILABLE"]).AVAILABLE:
+        return
+    wide = "export function go(a: A, b: B, c: C, d: D, e: E): void {}\n"
+    assert "too-many-arguments" in rules_for("wide.ts", wide)
+    narrow = "export function go(a: A, b: B, c: C, d: D): void {}\n"
+    assert "too-many-arguments" not in rules_for("narrow.ts", narrow)
+
+    assert "flag-argument" in rules_for("flag.ts", "export function render(deep: boolean): void {}\n")
+    assert "flag-argument" in rules_for("flag.py", "def check(strict=False):\n    pass\n")
+    assert "flag-argument" not in rules_for("setter.ts", "class A { setVisible(visible: boolean): void {} }\n")
+    options = "export function run({ labelId, strict }: { labelId: string; strict: boolean }): void {}\n"
+    assert "flag-argument" not in rules_for("opts.ts", options)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
