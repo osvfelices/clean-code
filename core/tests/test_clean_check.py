@@ -251,6 +251,21 @@ def test_prose_is_not_commented_code():
     assert "commented-code" in rules_for("r5.ts", "// return buildUser(row);\nconst a: number = 1;\n")
 
 
+def test_conditional_skip_is_a_platform_guard():
+    assert "skipped-test" in rules_for("s1.py", '@unittest.skip("failing buildbots")\ndef test_x(): pass\n')
+    assert "skipped-test" in rules_for("s2.py", '@pytest.mark.skip(reason="broken")\ndef test_x(): pass\n')
+    assert "skipped-test" not in rules_for("s3.py", '@unittest.skipIf(sys.platform == "win32", "posix only")\ndef test_x(): pass\n')
+    assert "skipped-test" not in rules_for("s4.py", '@unittest.skipUnless(WIN_VER, "needs XP")\ndef test_x(): pass\n')
+    assert "skipped-test" not in rules_for("s5.py", '@pytest.mark.skipif(sys.version_info < (3, 8), reason="3.8+")\ndef test_x(): pass\n')
+
+
+def test_focused_test_is_not_a_method_call():
+    assert "skipped-test" in rules_for("f1.ts", 'fit("focused", () => {});\n')
+    assert "skipped-test" not in rules_for("f2.py", "m = model.fit(data)\n")
+    assert "skipped-test" not in rules_for("f3.ts", 'test.skip(browserName === "firefox", "flaky");\n')
+    assert "skipped-test" in rules_for("f4.ts", 'it.skip("rate limits", async () => {});\n')
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

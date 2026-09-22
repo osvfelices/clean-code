@@ -274,7 +274,8 @@ def rule_non_null(src: Source, cfg: Config, root: Path) -> Violation | None:
 
 
 def rule_skipped_test(src: Source, cfg: Config, root: Path) -> Violation | None:
-    hits = grep_code(src, r"\b(it|test|describe)\.(skip|only|todo)\(|\bx(it|describe|test)\(|\bf(it|describe)\(|@pytest\.mark\.skip|@unittest\.skip|@Ignore\b|@Disabled\b|t\.Skip\(")
+    # A conditional skip is a platform guard, and .fit( is not a focused test.
+    hits = grep_code(src, r"\b(it|test|describe)\.(skip|only|todo)\(\s*['\"`]|\bx(it|describe|test)\(|(?<![.\w])f(it|describe)\(|@(pytest\.mark|unittest)\.skip(?![A-Za-z])|@Ignore\b|@Disabled\b|t\.Skip\(")
     return Violation("skipped-test", "Skipped, focused, or ignored test. An ignored test is an unanswered question.", hits) if hits else None
 
 
