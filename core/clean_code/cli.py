@@ -42,6 +42,9 @@ def main(argv: list[str]) -> int:
         else:
             print(report, file=sys.stderr)
         return 2
+    if mode in ("install", "uninstall"):
+        from .install import main as install_main
+        return install_main(argv[2:] + (["--uninstall"] if mode == "uninstall" else []))
     if mode == "rules":
         for r in RULES:
             where = "all languages" if r.languages is None else " ".join(sorted(r.languages))

@@ -1,13 +1,11 @@
 #!/usr/bin/env node
-// Thin front door for `npx`. The installer is install.sh; this only finds it and reports why it cannot run.
+// Thin front door for `npx`. Every command is handled by the python entry point; this only finds it.
 "use strict";
 
 const { spawnSync } = require("node:child_process");
-const { existsSync } = require("node:fs");
 const { join, dirname } = require("node:path");
 
 const ROOT = dirname(__dirname);
-const INSTALLER = join(ROOT, "install.sh");
 
 const USAGE = `clean-code <command>
 
@@ -39,15 +37,6 @@ function main(argv) {
   if (!command || command === "--help" || command === "-h") {
     console.log(USAGE);
     return 0;
-  }
-
-  if (command === "install" || command === "uninstall") {
-    if (!existsSync(INSTALLER)) {
-      console.error(`clean-code: installer missing at ${INSTALLER}`);
-      return 1;
-    }
-    const flags = command === "uninstall" ? ["--uninstall", ...rest] : rest;
-    return run("bash", [INSTALLER, ...flags]);
   }
 
   const interpreter = python();

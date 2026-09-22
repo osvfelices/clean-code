@@ -1,6 +1,7 @@
 {
   "allowConsole": [
     "core/clean_code/cli.py",
+    "core/clean_code/install.py",
     "core/tests/*.py",
     "bin/*.js"
   ],

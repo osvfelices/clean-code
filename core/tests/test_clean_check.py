@@ -367,6 +367,60 @@ def test_a_template_literal_may_still_span_lines():
     assert len(found) == 1 and "after the template" in found[0].text
 
 
+FOREIGN_SETTINGS = {
+    "theme": "dark",
+    "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "somebody-elses-hook"}]}]},
+}
+
+
+def sandboxed_installer(home: Path):
+    """Point the installer at a throwaway home so a test never touches the real one."""
+    from clean_code import install as inst
+    inst.HOME = home
+    inst.CORE = home / ".clean-code"
+    inst.CHECK = inst.CORE / "clean_check.py"
+    for key, a in list(inst.AGENTS.items()):
+        inst.AGENTS[key] = inst.Agent(
+            a.name, home / a.marker.name, home / a.settings.relative_to(Path.home()),
+            a.pre_matcher, a.post_matcher,
+            tuple((rel, home / tgt.relative_to(Path.home())) for rel, tgt in a.placements), a.next_step)
+    return inst
+
+
+def test_installer_merges_and_removes_only_its_own_hooks():
+    home = Path(tempfile.mkdtemp())
+    (home / ".claude").mkdir()
+    (home / ".claude/settings.json").write_text(json.dumps(FOREIGN_SETTINGS))
+    inst = sandboxed_installer(home)
+    settings = home / ".claude/settings.json"
+
+    def groups(event="PreToolUse"):
+        return json.loads(settings.read_text()).get("hooks", {}).get(event, [])
+
+    def mine(event="PreToolUse"):
+        return [g for g in groups(event) if any(str(inst.CHECK) in h["command"] for h in g["hooks"])]
+
+    def foreign():
+        return [g for g in groups() if any("somebody-elses-hook" in h["command"] for h in g["hooks"])]
+
+    assert inst.main(["--claude"]) == 0
+    assert len(mine()) == 1 and len(mine("PostToolUse")) == 1
+    assert len(foreign()) == 1
+    assert json.loads(settings.read_text())["theme"] == "dark"
+    assert (home / ".claude/settings.json.bak").is_file()
+    assert (inst.CORE / "clean_code/rules.py").is_file()
+    assert (home / ".claude/skills/clean-code/SKILL.md").is_file()
+
+    assert inst.main(["--claude"]) == 0
+    assert len(mine()) == 1, "installing twice must not stack hooks"
+
+    assert inst.main(["--claude", "--uninstall"]) == 0
+    assert mine() == [] and len(foreign()) == 1
+    assert json.loads(settings.read_text())["theme"] == "dark"
+    assert not inst.CORE.exists()
+    assert not (home / ".claude/skills/clean-code").exists()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
