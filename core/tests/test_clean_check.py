@@ -268,6 +268,39 @@ def test_focused_test_is_not_a_method_call():
     assert "skipped-test" in rules_for("f4.ts", 'it.skip("rate limits", async () => {});\n')
 
 
+def test_every_rule_is_registered_once_with_a_label():
+    ids = [r.id for r in cc.RULES]
+    assert len(ids) == len(set(ids)), "duplicate rule id"
+    assert set(ids) == set(cc.BY_ID), "BY_ID out of step with RULES"
+    for r in cc.RULES:
+        assert r.label and r.message, r.id
+        assert r.label != r.message, f"{r.id}: label should be the short form"
+
+
+def test_a_rule_only_runs_on_its_languages():
+    assert "weak-type" in rules_for("lang.ts", "const a = b as any;\n")
+    assert "weak-type" not in rules_for("lang.go", "var a any = b\n")
+    assert "closing-brace-comment" not in rules_for("lang.py", "x = 1  # end of thing\n")
+
+
+def test_unknown_disabled_rule_is_reported():
+    box = Path(tempfile.mkdtemp())
+    (box / ".clean-code.json").write_text('{"disableRules": ["coment-shouting"]}')
+    (box / "x.ts").write_text("// NEVER do this\nconst a: number = 1;\n")
+    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "files", "x.ts"],
+                          capture_output=True, text=True, cwd=str(box), env={"PATH": "/usr/bin:/bin"})
+    assert "unknown rules: coment-shouting" in proc.stderr, proc.stderr
+
+
+def test_rules_and_explain_are_queryable():
+    listing = subprocess.run([sys.executable, str(Path(cc.__file__)), "rules"], capture_output=True, text=True)
+    assert listing.returncode == 0 and "weak-type" in listing.stdout
+    good = subprocess.run([sys.executable, str(Path(cc.__file__)), "explain", "weak-type"], capture_output=True, text=True)
+    assert good.returncode == 0 and "Write the real type" in good.stdout
+    bad = subprocess.run([sys.executable, str(Path(cc.__file__)), "explain", "nope"], capture_output=True, text=True)
+    assert bad.returncode == 1
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
