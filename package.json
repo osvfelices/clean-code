@@ -1,0 +1,25 @@
+{
+  "name": "@osvfelices/clean-code",
+  "version": "3.0.0",
+  "description": "Clean Code enforcement for Claude Code and Codex, installed once, active in every project",
+  "bin": {
+    "clean-code": "bin/clean-code.js"
+  },
+  "files": [
+    "bin",
+    "core",
+    "claude",
+    "skills",
+    "install.sh",
+    "README.md",
+    "BASELINE.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "python3 core/tests/test_clean_check.py && python3 core/tests/bench.py"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
