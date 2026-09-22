@@ -42,7 +42,7 @@ already wrong with it. On a real working tree that was 167 of 169 findings inher
 bills you for someone else's debt gets switched off, so this one only answers for the lines the
 edit introduced. Whole files are still scanned in `files` mode and in CI, which is what a sweep is.
 
-**Precision beats recall.** One rule that misfires discredits the other nineteen. Every rule is
+**Precision beats recall.** One rule that misfires discredits the other twenty. Every rule is
 measured against code written by Microsoft and by the CPython core team before it ships: if a rule
 fires heavily there, the rule is wrong and they are not. That test killed candidates. Function
 length flags 9% of real React components, because JSX is verbose and a long component is not a
@@ -66,7 +66,7 @@ file out of scope. It had been telling protoc output to rewrite its own `DO NOT 
 
 ## Rules
 
-Eighteen by default. Two more register when tree-sitter is importable.
+Nineteen by default. Two more register when tree-sitter is importable.
 
 | | |
 | --- | --- |
@@ -150,6 +150,7 @@ core/clean_code/
   source.py                a file as code with comments blanked out, plus the comments
   rules.py                 the rules and the registry that holds them
   ast_rules.py             the rules that need a syntax tree, registered only if there is one
+  boundary.py              the one rule that reads past the file it is given
   report.py                violations to the lines the agent reads, and the fixes needing no judgement
   hooks.py                 the hook protocol: edited lines, what to block, what was already said
   install.py               the agents as a table: settings, matchers, what goes where
@@ -160,7 +161,7 @@ A rule declares its id, label, message, languages and scope once. The report, th
 and the CLI all read it from there. Before that, the report kept a parallel table keyed by rule id,
 and it had already drifted by two entries.
 
-`source.py` is the load-bearing module: eleven of the twenty rules read its output. It knows that a
+`source.py` is the load-bearing module: eleven of the twenty-one rules read its output. It knows that a
 slash can open a regex literal, that a character class makes a slash literal, and that only a
 backtick or a triple quote may span lines, which is how an apostrophe reaches JSX prose without
 swallowing the rest of the file. Each of those was a silent bug that made comment rules fire on
@@ -180,7 +181,7 @@ hook, and uninstalling leaves everyone else's alone. All four are asserted, not 
 ## Tests
 
 ```bash
-python3 core/tests/test_clean_check.py   # 39 tests
+python3 core/tests/test_clean_check.py   # 41 tests
 python3 core/tests/bench.py              # output per edit against whatever corpora are present
 ```
 
