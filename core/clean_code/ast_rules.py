@@ -29,6 +29,7 @@ IMPLICIT_PARAMS = {"self", "cls"}
 
 FLAG_PARAMETER = re.compile(r"^[A-Za-z_$][\w$]*\??\s*(:\s*boolean\b|=\s*(true|false|True|False)\s*$)")
 SETTER_NAME = re.compile(r"^(set|toggle|mark|enable|disable)[A-Z_]")
+OPTIONAL_PARAMETER = re.compile(r"=(?!=)|^\.\.\.|^\*|\?\s*:")
 
 
 def syntax_tree(src: Source):
@@ -66,7 +67,9 @@ def functions(src: Source):
 
 
 def _too_many_arguments(src, cfg, root):
-    return [hit(src, line) for _, params, line in functions(src) if len(params) >= cfg.max_arguments]
+    # Count what a caller must pass. A defaulted or rest parameter is not a burden at the call site.
+    return [hit(src, line) for _, params, line in functions(src)
+            if sum(1 for p in params if not OPTIONAL_PARAMETER.search(p)) >= cfg.max_arguments]
 
 
 def _flag_argument(src, cfg, root):

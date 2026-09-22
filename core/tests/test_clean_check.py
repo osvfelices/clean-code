@@ -319,6 +319,10 @@ def test_too_many_arguments_and_flag_argument():
     assert "too-many-arguments" in rules_for("wide.ts", wide)
     narrow = "export function go(a: A, b: B, c: C, d: D): void {}\n"
     assert "too-many-arguments" not in rules_for("narrow.ts", narrow)
+    optional = "def make(name, label, message, languages=None, whole_file=False):\n    pass\n"
+    assert "too-many-arguments" not in rules_for("optional.py", optional)
+    rest = "export function log(a: A, b: B, c: C, d: D, ...rest: E[]): void {}\n"
+    assert "too-many-arguments" not in rules_for("rest.ts", rest)
 
     assert "flag-argument" in rules_for("flag.ts", "export function render(deep: boolean): void {}\n")
     assert "flag-argument" in rules_for("flag.py", "def check(strict=False):\n    pass\n")
