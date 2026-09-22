@@ -58,6 +58,8 @@ if $uninstall; then
   rm -rf "$CORE"
 else
   mkdir -p "$CORE"
+  rm -rf "$CORE/clean_code"
+  cp -R "$SRC/core/clean_code" "$CORE/clean_code"
   cp "$SRC/core/clean_check.py" "$CHECK"
   chmod +x "$CHECK"
 fi

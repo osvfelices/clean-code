@@ -21,4 +21,4 @@ jobs:
       - name: Aggregate output ceiling
         run: python3 core/tests/bench.py "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
       - name: Self check
-        run: python3 core/clean_check.py files core/clean_check.py core/tests/bench.py install.sh || true
+        run: python3 core/clean_check.py files core/clean_code/*.py core/tests/bench.py

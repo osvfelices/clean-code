@@ -37,6 +37,21 @@ Existing settings are merged, never overwritten; a `.bak` copy is left next to e
 ## CI
     python3 ~/.clean-code/clean_check.py files src/
 
+## Layout
+    core/clean_check.py        launcher at a stable path, so installed hooks never change
+    core/clean_code/config.py  which files count, per-project overrides, project root
+    core/clean_code/source.py  a file as code with comments blanked out, plus the comments
+    core/clean_code/rules.py   the rules and the registry that holds them
+    core/clean_code/report.py  violations to the few lines the agent reads, and autofix
+    core/clean_code/hooks.py   the hook protocol: edited lines, what to block, what was said before
+    core/clean_code/cli.py     entry point
+
+    python3 core/clean_check.py rules              what exists and where it applies
+    python3 core/clean_check.py explain weak-type  what one rule means
+
+This repo disables `suppressed-check` and `skipped-test` on itself: the patterns those rules
+look for appear here as regex literals, which is data, not a defect.
+
 ## Tests
     python3 core/tests/test_clean_check.py   # rule precision and recall, hermetic
     python3 core/tests/bench.py              # output per edit against real codebases

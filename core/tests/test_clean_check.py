@@ -4,8 +4,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import clean_check as cc  # noqa: E402  (test-only import path)
+CORE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(CORE))
+import clean_code as cc
+from clean_code import rules as rules_module
+
+ENTRY = CORE / "clean_check.py"
 
 ROOT = Path(tempfile.mkdtemp())
 CFG = cc.Config.load(ROOT)
@@ -88,10 +92,10 @@ def test_pre_blocks_weakening():
 
 def test_post_mode_exit_code():
     path = ROOT / "t.ts"; path.write_text("console.log(1);\n")
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps({"tool_input": {"file_path": str(path)}}),
+    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps({"tool_input": {"file_path": str(path)}}),
                           capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
     assert proc.returncode == 2 and "debug output: L1" in proc.stderr
-    again = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps({"tool_input": {"file_path": str(path)}}),
+    again = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps({"tool_input": {"file_path": str(path)}}),
                            capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
     assert again.returncode == 2 and "still open" in again.stderr and len(again.stderr) < 80
 
@@ -132,7 +136,7 @@ def test_codex_pre_blocks_type_removal():
 def test_codex_post_reports_patched_files():
     (ROOT / "fresh.ts").write_text('console.log("hi");\nconst a = b as any;\n')
     payload = {"tool_name": "apply_patch", "cwd": str(ROOT), "session_id": "codex1", "tool_input": {"command": PATCH}}
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
                           capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, cwd=str(ROOT))
     assert proc.returncode == 2 and "fresh.ts" in proc.stderr and "debug output: L1" in proc.stderr
 
@@ -175,7 +179,7 @@ def test_post_mode_scopes_to_edited_lines():
     path = ROOT / "legacy.ts"
     path.write_text("console.log('old');\nconst keep: number = 1;\nconst b = c as any;\n")
     payload = {"session_id": "scope1", "tool_input": {"file_path": str(path), "old_string": "const keep: number = 1;", "new_string": "const b = c as any;"}}
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
                           capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
     assert "loose type" in proc.stderr and ": L3" in proc.stderr, proc.stderr
     assert "debug output" not in proc.stderr, proc.stderr
@@ -185,7 +189,7 @@ def test_unlocatable_edit_still_checks_whole_file():
     path = ROOT / "whole.ts"
     path.write_text("console.log('x');\n")
     payload = {"session_id": "scope2", "tool_input": {"file_path": str(path)}}
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
                           capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
     assert "debug output: L1" in proc.stderr
 
@@ -194,7 +198,7 @@ def test_malformed_config_is_reported_not_swallowed():
     bad = Path(tempfile.mkdtemp())
     (bad / ".clean-code.json").write_text('{"ignore": ["a",]}')
     (bad / "x.ts").write_text("const a = b as any;\n")
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "files", "x.ts"],
+    proc = subprocess.run([sys.executable, str(ENTRY), "files", "x.ts"],
                           capture_output=True, text=True, cwd=str(bad), env={"PATH": "/usr/bin:/bin"})
     assert "ignoring malformed" in proc.stderr, proc.stderr
 
@@ -222,7 +226,7 @@ def test_recall_on_the_edited_line():
         path = box / f"host{i}.{ext}"
         path.write_text(host + "\n" + bad + "\n")
         payload = {"session_id": f"recall{i}", "tool_input": {"file_path": str(path), "old_string": "absent", "new_string": bad}}
-        proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+        proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
                               capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"})
         assert needle.lower() in proc.stderr.lower(), f"{bad!r} went unreported: {proc.stderr!r}"
 
@@ -232,7 +236,7 @@ def test_autofixable_defect_is_removed_rather_than_reported():
     path = box / "banner.ts"
     path.write_text("export const a: number = 1;\n// ---------- section ----------\n")
     payload = {"session_id": "autofix1", "tool_input": {"file_path": str(path), "old_string": "absent", "new_string": "// ---------- section ----------"}}
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "post"], input=json.dumps(payload),
+    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
                           capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"})
     assert proc.returncode == 0 and proc.stderr == ""
     assert "----" not in path.read_text()
@@ -287,17 +291,17 @@ def test_unknown_disabled_rule_is_reported():
     box = Path(tempfile.mkdtemp())
     (box / ".clean-code.json").write_text('{"disableRules": ["coment-shouting"]}')
     (box / "x.ts").write_text("// NEVER do this\nconst a: number = 1;\n")
-    proc = subprocess.run([sys.executable, str(Path(cc.__file__)), "files", "x.ts"],
+    proc = subprocess.run([sys.executable, str(ENTRY), "files", "x.ts"],
                           capture_output=True, text=True, cwd=str(box), env={"PATH": "/usr/bin:/bin"})
     assert "unknown rules: coment-shouting" in proc.stderr, proc.stderr
 
 
 def test_rules_and_explain_are_queryable():
-    listing = subprocess.run([sys.executable, str(Path(cc.__file__)), "rules"], capture_output=True, text=True)
+    listing = subprocess.run([sys.executable, str(ENTRY), "rules"], capture_output=True, text=True)
     assert listing.returncode == 0 and "weak-type" in listing.stdout
-    good = subprocess.run([sys.executable, str(Path(cc.__file__)), "explain", "weak-type"], capture_output=True, text=True)
+    good = subprocess.run([sys.executable, str(ENTRY), "explain", "weak-type"], capture_output=True, text=True)
     assert good.returncode == 0 and "Write the real type" in good.stdout
-    bad = subprocess.run([sys.executable, str(Path(cc.__file__)), "explain", "nope"], capture_output=True, text=True)
+    bad = subprocess.run([sys.executable, str(ENTRY), "explain", "nope"], capture_output=True, text=True)
     assert bad.returncode == 1
 
 

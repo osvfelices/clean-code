@@ -1,4 +1,5 @@
 {
-  "allowConsole": ["core/clean_check.py", "core/tests/*.py"],
+  "allowConsole": ["core/clean_code/cli.py", "core/tests/*.py"],
+  "disableRules": ["suppressed-check", "skipped-test"],
   "ignore": ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.next/**", "**/vendor/**", "**/*.d.ts", "**/*.min.js", "core/tests/test_clean_check.py"]
 }
