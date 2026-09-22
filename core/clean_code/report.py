@@ -9,13 +9,8 @@ from .rules import BY_ID, Violation
 from .source import load_source
 
 
-MAX_LINES_PER_RULE = 8
-
-
 def line_numbers(hits: list[str]) -> str:
-    nums = [h.split(":", 1)[0] for h in hits]
-    shown = ",".join(nums[:MAX_LINES_PER_RULE])
-    return shown + (f" +{len(nums) - MAX_LINES_PER_RULE}" if len(nums) > MAX_LINES_PER_RULE else "")
+    return ",".join(h.split(":", 1)[0] for h in hits)
 
 
 def format_report(results: dict[Path, list[Violation]], root: Path) -> str:
@@ -27,12 +22,11 @@ def format_report(results: dict[Path, list[Violation]], root: Path) -> str:
             rel = path
         lines.append(str(rel))
         for v in vs:
-            r = BY_ID.get(v.rule)
-            label = r.label if r else v.message
-            if r and r.whole_file:
-                lines.append(f"  {label}: {v.hits[0]}")
+            r = BY_ID[v.rule]
+            if r.whole_file:
+                lines.append(f"  {r.label}: {v.hits[0]}")
             else:
-                lines.append(f"  {label}: L{line_numbers(v.hits)}" if v.hits else f"  {label}")
+                lines.append(f"  {r.label}: L{line_numbers(v.hits)}")
     return "\n".join(lines)
 
 

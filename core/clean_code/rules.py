@@ -6,7 +6,7 @@ the config and the CLI can all read those from one place.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -20,8 +20,7 @@ MAX_HITS_PER_RULE = 5
 @dataclass
 class Violation:
     rule: str
-    message: str
-    hits: list[str] = field(default_factory=list)
+    hits: list[str]
 
 
 CODE_LIKE_COMMENT = re.compile(
@@ -289,5 +288,5 @@ def check_file(path: Path, cfg: Config, root: Path, only_lines: set[int] | None 
             hits = [h for h in hits if line_of(h) in only_lines]
             if not hits:
                 continue
-        out.append(Violation(r.id, r.message, hits[:MAX_HITS_PER_RULE]))
+        out.append(Violation(r.id, hits[:MAX_HITS_PER_RULE]))
     return out

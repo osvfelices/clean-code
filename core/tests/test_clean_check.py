@@ -341,6 +341,32 @@ def test_prose_may_quote_a_setting_it_does_not_change():
     assert cc.pre_check(src, ROOT)
 
 
+def test_a_regex_literal_is_not_a_comment():
+    def comments(text, ext=".ts"):
+        return cc.split_comments(text, ext)[1]
+
+    assert comments("if (!/^[^:/?#]+:\\/\\//.test(uri)) { run(); }") == []
+    assert comments('const s = t.replace(/[/\\\\]+/g, "-");') == []
+    assert len(comments("const a = 1 / 2; // real comment")) == 1
+    assert len(comments("const r = /ab+c/; // after a regex")) == 1
+    assert len(comments("const d = total / count; // ratio")) == 1
+
+
+def test_an_apostrophe_in_prose_does_not_open_a_string():
+    jsx = "<p>add to fans' library</p>\n{/* Quick Stats */}\n// TODO: later\n"
+    assert len(cc.split_comments(jsx, ".tsx")[1]) == 2
+    code = "const a = 'real string'; // after\nconst b = \"don't\"; // inside quotes\n"
+    assert len(cc.split_comments(code, ".ts")[1]) == 2
+    py = 'x = "a"  # comment\ns = "unterminated\ny = 1  # another\n'
+    assert len(cc.split_comments(py, ".py")[1]) == 2
+
+
+def test_a_template_literal_may_still_span_lines():
+    text = "const q = `\n  SELECT 1\n`; // after the template\n"
+    found = cc.split_comments(text, ".ts")[1]
+    assert len(found) == 1 and "after the template" in found[0].text
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

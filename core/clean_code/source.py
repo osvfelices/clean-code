@@ -10,6 +10,9 @@ from pathlib import Path
 
 from .config import C_LIKE, HASH_LIKE
 
+# A slash opens a regex literal only where a value may start, never after one.
+REGEX_MAY_START = re.compile(r"(^|[(,=:\[!&|?{};+\-*%~^<>]|\b(return|typeof|case|in|of|do|else|yield|await))\s*$")
+
 
 @dataclass
 class Comment:
@@ -42,11 +45,18 @@ def split_comments(text: str, ext: str) -> tuple[list[str], list[Comment]]:
             buf.append("\n"); line_no += 1; i += 1; continue
         if ch in ("'", '"', "`"):
             q = text[i:i + 3] if triple and text[i:i + 3] in ('"""', "'''") else ch
+            # Only a backtick or a triple quote may span lines. An unclosed quote is prose,
+            # which is how an apostrophe reaches JSX text.
+            bounded = len(q) == 1 and q != "`"
             j = i + len(q)
             while j < n and text[j:j + len(q)] != q:
+                if bounded and text[j] == "\n":
+                    break
                 if text[j] == "\\": j += 1
                 if text[j:j + 1] == "\n": line_no += 1
                 j += 1
+            if j >= n or text[j:j + len(q)] != q:
+                buf.append(ch); i += 1; continue
             span = text[i:j + len(q)]
             if triple and len(q) == 3:
                 comments.append(Comment(line_no - span.count("\n"), span.strip('"\'')))
@@ -54,6 +64,18 @@ def split_comments(text: str, ext: str) -> tuple[list[str], list[Comment]]:
             else:
                 buf.append(span.replace("\n", "\n"))
             i = j + len(q); continue
+        if block_open and ch == "/" and two != "//" and two != "/*" and REGEX_MAY_START.search("".join(buf)[-24:]):
+            j, in_class = i + 1, False
+            while j < n and text[j] != "\n" and not (text[j] == "/" and not in_class):
+                if text[j] == "\\":
+                    j += 1
+                elif text[j] == "[":
+                    in_class = True
+                elif text[j] == "]":
+                    in_class = False
+                j += 1
+            if j < n and text[j] == "/":
+                buf.append(" " * (j + 1 - i)); i = j + 1; continue
         if block_open and two == block_open:
             j = text.find(block_close, i + 2)
             j = n if j == -1 else j + 2

@@ -9,11 +9,4 @@ from .rules import BY_ID, RULES, Rule, Violation, check_file, is_generated, shou
 from .source import Comment, Source, hit, line_of, load_source, split_comments
 from . import ast_rules
 
-__all__ = [
-    "CHECKED", "C_LIKE", "Config", "HASH_LIKE", "TS_LIKE", "changed_files", "matches_any", "project_root",
-    "edit_targets", "edited_lines", "patch_sections", "pre_check",
-    "autofix", "format_report",
-    "BY_ID", "RULES", "Rule", "Violation", "check_file", "is_generated", "shouts",
-    "Comment", "Source", "hit", "line_of", "load_source", "split_comments",
-    "ast_rules",
-]
+__all__ = [name for name in dir() if not name.startswith("_")]
