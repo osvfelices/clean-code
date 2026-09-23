@@ -9,16 +9,17 @@ const ROOT = dirname(__dirname);
 
 const USAGE = `clean-code <command>
 
-  install            install for every agent found on this machine
-  install --claude   install for Claude Code only
-  install --codex    install for Codex only
-  uninstall          remove from every agent
-  rules              list the rules and the languages each one holds for
-  explain <rule>     what one rule means
-  files <path...>    check paths and exit non-zero on a finding
+  install               install for every agent found on this machine
+  install --claude      install for Claude Code only
+  install --codex       install for Codex only
+  install --no-parser   skip tree-sitter; .tsx and .jsx edits are then not checked
+  uninstall             remove from every agent
+  rules                 list the rules and the languages each one holds for
+  explain <rule>        what one rule means
+  files <path...>       check paths and exit non-zero on a finding
 
-Optional: pip install tree-sitter tree-sitter-language-pack
-adds the two rules that need a syntax tree.`;
+install sets up tree-sitter in a private environment under ~/.clean-code and
+says on its last line whether React, TSX and JSX checking is on.`;
 
 function python() {
   for (const candidate of ["python3", "python"]) {

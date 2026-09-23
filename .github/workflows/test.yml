@@ -13,16 +13,22 @@ jobs:
         python: ["3.9", "3.14"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests without tree-sitter
         run: python3 core/tests/test_clean_check.py
-      - name: Unit tests with tree-sitter
+      - name: Benchmark without tree-sitter
+        run: python3 core/tests/bench.py --gate
+      - name: Install the grammars the installer pins
         run: |
-          python3 -m pip install --quiet tree-sitter tree-sitter-language-pack
-          python3 core/tests/test_clean_check.py
-      - name: Aggregate output ceiling
-        run: python3 core/tests/bench.py "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+          python3 -c "import sys; sys.path.insert(0, 'core'); from clean_code.install import PARSER_PACKAGES; print('\n'.join(PARSER_PACKAGES))" > parser-requirements.txt
+          python3 -m pip install --quiet -r parser-requirements.txt
+      - name: Unit tests with tree-sitter
+        run: python3 core/tests/test_clean_check.py
+      - name: Benchmark with tree-sitter
+        run: python3 core/tests/bench.py --gate
       - name: Self check
         run: python3 core/clean_check.py files core/clean_code/*.py core/tests/bench.py bin/clean-code.js

@@ -1,28 +1,55 @@
 # Baseline
 
-Numbers to beat, or at least not to lose. Measured 2026-09-22 on macOS, Python 3.14.
+Numbers to beat, or at least not to lose.
 
 ## Per-edit hook output
 
-The only number that matters day to day: what the hook prints after one edit. Every byte here
-lands in the agent's context and stays there.
+What the hook prints after one edit, next to what it finds and what it declines to judge. Every byte
+here lands in the agent's context. Reproduce with `python3 core/tests/bench.py`; the edits are fixed
+in `core/tests/bench_cases.json`, and two runs agree on everything but time. Measured 2026-09-23 on
+macOS, Python 3.9 without tree-sitter and 3.14 with the grammars the installer pins. Time varies
+with the machine and the run, so it is the range seen across runs, not a figure to hold.
 
-| | before | after |
+| | without tree-sitter | with it |
 |---|---|---|
-| mean output per edit | 228 b | 2.2 b |
-| median output per edit | 219 b | 0 b |
-| edits producing nothing | 13% | 96% |
+| labeled edits | 43 | 43 |
+| defects found / missed / invented | 22 / 0 / 0 | 25 / 0 / 0 |
+| clean edits reported clean | 16 | 17 |
+| not checked, each one expected | 5 | 1 |
+| real edits replayed (this repository, `f9cc7e6..b2442ca`) | 48 | 48 |
+| silent | 98% | 96% |
+| mean bytes the agent reads | 2.4 | 6.0 |
+| hook time, median | 50 to 65 ms | 55 to 80 ms |
 
-125 edits simulated across VS Code, the Python standard library and a production TypeScript repo.
-Reproduce with `python3 core/tests/bench.py`, which fails above 25 bytes per edit.
+`bench.py --gate` fails on any labeled mismatch or any hook error. There is no byte ceiling: the
+real edits here are mostly Python, and a byte count met by declining to check proves nothing.
+
+Historical, not reproducible: an earlier benchmark reported 2.2 bytes and 96% silence over 125 edits
+of VS Code, the Python standard library and a production repository. It marked an existing line as
+the edit and counted stderr only; its sampling could not select 125 edits. It is withdrawn.
 
 ## Recall
 
-Eleven defects injected on the edited line, all reported. A twelfth, a section banner, is removed
-by autofix instead of reported, which costs nothing and is the better outcome. Pinned by
+Eleven defects injected on the edited line, all reported. A twelfth, a section banner, was once
+removed by autofix; the hook is read-only now, so it is reported like the rest. Pinned by
 `test_recall_on_the_edited_line` so precision work can never quietly trade recall away.
 
-## Whole-file hit counts
+## Method
+
+Any rule change gets validated against all three corpora before shipping, never against one
+project, because the tool installs globally and runs on every language it supports. Fixing
+precision with a per-project allowlist is not a fix.
+
+- VS Code's `src`, from a clone of `microsoft/vscode` at a pinned commit
+- the CPython standard library of the Python being tested
+- a working TypeScript or Next.js codebase, for domain vocabulary the first two lack
+
+## History
+
+The sections below record earlier rounds as they were measured then. Later changes superseded
+some of them; the current contract is in the README.
+
+### Whole-file hit counts
 
 Whole-file counts stopped driving hook output once post mode narrowed to edited lines, but they
 still show which rules were firing on code written by people who know what they are doing.
@@ -40,7 +67,7 @@ Files carrying at least one violation went from 97% to 53% on VS Code and from 9
 standard library. The standard library barely moves because what remains is true: it really does
 carry 90 TODO markers and 83 decorative banners.
 
-## What the fixes were
+### What the fixes were
 
 Each change is traced to a false positive found in one of the corpora, never to an opinion.
 
@@ -53,19 +80,10 @@ Each change is traced to a false positive found in one of the corpora, never to 
 7. Narration is narration when the verb opens the comment. `cannot be added` is ordinary English.
 8. Shouting is a closed set of emphasis words, not an open allowlist of acronyms. An uppercase
    identifier is a name. The old rule could never be finished: one repo alone held 391 enum values.
-9. A malformed `.clean-code.json` is reported. It used to discard the whole config in silence.
+9. A malformed `.clean-code.json` is reported. It used to discard the whole config in silence. It now
+   stops the check instead.
 
-## Method
-
-Any rule change gets validated against all three corpora before shipping, never against one
-project, because the tool installs globally and runs on every language it supports. Fixing
-precision with a per-project allowlist is not a fix.
-
-- VS Code's `src`, from a clone of `microsoft/vscode` at a pinned commit
-- the CPython standard library of the Python being tested
-- any working TypeScript repo, for domain vocabulary the first two lack
-
-## Later rounds
+### Later rounds
 
 | Change | Measured effect |
 | --- | --- |

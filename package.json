@@ -1,7 +1,7 @@
 {
   "name": "@osvfelices/clean-code",
   "version": "3.0.0",
-  "description": "Clean Code enforcement for Claude Code and Codex, installed once, active in every project",
+  "description": "Agent edit hooks that hold newly written code to account, and say not checked rather than guess",
   "bin": {
     "clean-code": "bin/clean-code.js"
   },

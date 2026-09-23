@@ -5,7 +5,6 @@ import fnmatch
 import json
 import os
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +16,9 @@ HASH_LIKE = {".py", ".rb", ".sh"}
 
 
 TS_LIKE = {".ts", ".tsx"}
+
+
+JS_LIKE = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 
 
 CHECKED = C_LIKE | HASH_LIKE
@@ -32,6 +34,56 @@ DEFAULT_CONFIG = {
 }
 
 
+class ConfigError(ValueError):
+    """The project's .clean-code.json asks for something the checker cannot honour."""
+
+
+def is_patterns(value) -> bool:
+    return isinstance(value, list) and all(isinstance(p, str) and p for p in value)
+
+
+def is_ratio(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1
+
+
+def is_argument_limit(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 20
+
+
+SCHEMA = {
+    "ignore": (is_patterns, "a list of glob patterns"),
+    "allowConsole": (is_patterns, "a list of glob patterns"),
+    "allowTodo": (lambda v: isinstance(v, bool), "true or false"),
+    "disableRules": (lambda v: isinstance(v, list) and all(isinstance(r, str) for r in v), "a list of rule ids"),
+    "maxCommentRatio": (is_ratio, "a number above 0 and at most 1"),
+    "maxArguments": (is_argument_limit, "a whole number from 1 to 20"),
+}
+
+
+def validated(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"{path.name} is not valid JSON at line {exc.lineno}") from exc
+    except OSError as exc:
+        raise ConfigError(f"{path.name} cannot be read: {exc.strerror}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path.name} must be a JSON object")
+    for key, value in data.items():
+        if key not in SCHEMA:
+            raise ConfigError(f'{path.name} has an unknown key "{key}"; the keys are {", ".join(sorted(SCHEMA))}')
+        valid, meaning = SCHEMA[key]
+        if not valid(value):
+            raise ConfigError(f'"{key}" must be {meaning}')
+    # Imported here: the rules read this module, and the registry is complete once they are all loaded.
+    from .ast_rules import RULE_IDS
+    from .rules import BY_ID
+    for rule_id in data.get("disableRules", []):
+        if rule_id not in set(BY_ID) | RULE_IDS:
+            raise ConfigError(f'unknown rule "{rule_id}" in "disableRules"; run `clean-code rules` for the list')
+    return data
+
+
 @dataclass
 class Config:
     ignore: list[str]
@@ -43,13 +95,11 @@ class Config:
 
     @staticmethod
     def load(root: Path) -> "Config":
+        """The project's .clean-code.json over the defaults. Anything the checker cannot honour raises."""
         data = dict(DEFAULT_CONFIG)
         path = root / ".clean-code.json"
         if path.is_file():
-            try:
-                data.update(json.loads(path.read_text()))
-            except json.JSONDecodeError as exc:
-                print(f"clean-code: ignoring malformed {path}: {exc}", file=sys.stderr)
+            data.update(validated(path))
         return Config(
             ignore=list(data["ignore"]),
             allow_console=list(data["allowConsole"]),

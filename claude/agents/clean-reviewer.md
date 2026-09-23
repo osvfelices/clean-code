@@ -1,6 +1,6 @@
 ---
 name: clean-reviewer
-description: Read-only Clean Code reviewer. Use after a feature is done, before a commit or PR, to get a prioritized list of readability and safety defects the automated checker cannot detect.
+description: Read-only code reviewer. Use after a feature is done, before a commit or PR, to get a prioritized list of readability and safety defects the automated checker cannot detect.
 tools: Read, Grep, Glob, Bash(git diff:*), Bash(git status:*)
 model: sonnet
 ---

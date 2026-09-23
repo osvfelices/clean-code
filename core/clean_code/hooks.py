@@ -11,16 +11,116 @@ from pathlib import Path
 from .config import TS_LIKE, matches_any
 
 
-def edited_lines(path: Path, news: list[str]) -> set[int] | None:
-    """Lines this edit introduced. None when the edit cannot be located and the whole file stands."""
-    wanted = {l.strip() for n in news if n for l in n.split("\n") if l.strip()}
-    if not wanted:
+class NoEdit(ValueError):
+    """The hook input does not name an edit, so nothing about it can be called clean."""
+
+
+def edited_lines(payload: dict) -> list[tuple[Path, set[int] | None]]:
+    """Each file an edit wrote and the lines it introduced there, or None where those cannot be established.
+
+    An empty set is an edit that introduced nothing. An input that names no edit raises NoEdit instead.
+    """
+    inp = payload.get("tool_input")
+    if not isinstance(inp, dict):
+        raise NoEdit
+    cwd = Path(payload.get("cwd") or os.getcwd())
+    patch = inp.get("command", "")
+    if payload.get("tool_name") == "apply_patch" or (isinstance(patch, str) and "*** Begin Patch" in patch):
+        files = patch_files(patch, cwd) if isinstance(patch, str) else []
+        if not files:
+            raise NoEdit
+        return [(path, confirmed(path, patch_additions(op, body, path))) for op, path, body in files if op != "Delete"]
+    target = inp.get("file_path") or inp.get("path")
+    if not isinstance(target, str) or not target:
+        raise NoEdit
+    path = Path(target) if Path(target).is_absolute() else cwd / target
+    response = payload.get("tool_response")
+    return [(path, confirmed(path, claude_additions(response) if isinstance(response, dict) else None))]
+
+
+def claude_additions(response: dict) -> dict[int, str] | None:
+    """Line number to text for every line Claude Code reports adding, read from its structuredPatch."""
+    if response.get("type") == "create":
+        return dict(enumerate(str(response.get("content", "")).split("\n"), 1))
+    hunks = response.get("structuredPatch")
+    if not isinstance(hunks, list):
         return None
+    added: dict[int, str] = {}
+    for hunk in hunks:
+        line = hunk.get("newStart")
+        if not isinstance(line, int):
+            return None
+        for row in hunk.get("lines", []):
+            if row[:1] == "+":
+                added[line] = row[1:]
+            if row[:1] in (" ", "+"):
+                line += 1
+    return added
+
+
+def patch_additions(op: str, body: list[str], path: Path) -> dict[int, str] | None:
+    """Line number to text for every line a Codex patch added, located the way Codex applies it.
+
+    A patch carries no line numbers. Each hunk is found by its context, after the previous hunk and
+    its @@ anchor. A hunk that matches more than one place makes the whole file's scope unknown.
+    """
+    if op == "Add":
+        return {i: row[1:] for i, row in enumerate(body, 1) if row[:1] == "+"}
+    lines = read_lines(path)
+    if lines is None:
+        return None
+    added: dict[int, str] = {}
+    cursor = 0
+    for anchor, hunk in patch_hunks(body):
+        if anchor:
+            found = next((i for i in range(cursor, len(lines)) if lines[i].strip() == anchor), None)
+            if found is None:
+                return None
+            cursor = found + 1
+        if not any(row[:1] == "+" and row[1:].strip() for row in hunk):
+            continue
+        after = [row[1:] for row in hunk if row[:1] in (" ", "+", "")]
+        places = [s for s in range(cursor, len(lines) - len(after) + 1)
+                  if all(lines[s + k].rstrip() == text.rstrip() for k, text in enumerate(after))]
+        if len(places) != 1:
+            return None
+        k = places[0]
+        for row in hunk:
+            if row[:1] == "+":
+                added[k + 1] = row[1:]
+            if row[:1] in (" ", "+", ""):
+                k += 1
+        cursor = k
+    return added
+
+
+def patch_hunks(body: list[str]) -> list[tuple[str, list[str]]]:
+    hunks: list[tuple[str, list[str]]] = [("", [])]
+    for row in body:
+        if row.startswith("@@"):
+            hunks.append((row[2:].strip(), []))
+        else:
+            hunks[-1][1].append(row)
+    return [h for h in hunks if h[0] or h[1]]
+
+
+def confirmed(path: Path, added: dict[int, str] | None) -> set[int] | None:
+    """The added lines, provided the file still holds them there. A formatter or a person may have moved them."""
+    if added is None:
+        return None
+    lines = read_lines(path)
+    if lines is None:
+        return None
+    if any(n > len(lines) or lines[n - 1] != text.rstrip("\r") for n, text in added.items()):
+        return None
+    return set(added)
+
+
+def read_lines(path: Path) -> list[str] | None:
     try:
-        text = path.read_text(errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace").split("\n")
     except OSError:
         return None
-    return {i + 1 for i, l in enumerate(text.split("\n")) if l.strip() in wanted}
 
 
 def seen_before(session: str, path: Path, report: str) -> bool:
@@ -58,27 +158,32 @@ def type_annotations_removed(old: str, new: str) -> bool:
     return after < before and len(new.splitlines()) >= len(old.splitlines()) * 0.8
 
 
-def patch_sections(patch: str, cwd: Path) -> list[tuple[Path, str, str]]:
-    """Split a Codex apply_patch body into (path, removed text, added text) per file."""
-    sections: list[list] = []
+PATCH_FILE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$")
+PATCH_MOVE = re.compile(r"^\*\*\* Move to: (.+)$")
+
+
+def patch_files(patch: str, cwd: Path) -> list[tuple[str, Path, list[str]]]:
+    """Split a Codex apply_patch body into (operation, path, body rows) per file."""
+    files: list[list] = []
     for line in patch.splitlines():
-        head = re.match(r"^\*\*\* (Add|Update|Delete) File: (.+)$", line)
-        move = re.match(r"^\*\*\* Move to: (.+)$", line)
+        head, move = PATCH_FILE.match(line), PATCH_MOVE.match(line)
         if head or move:
             name = Path((head.group(2) if head else move.group(1)).strip())
             path = name if name.is_absolute() else cwd / name
-            if move and sections:
-                sections[-1][0] = path
-            else:
-                sections.append([path, [], []])
+            if head:
+                files.append([head.group(1), path, []])
+            elif files:
+                files[-1][1] = path
             continue
-        if not sections or line.startswith("***"):
-            continue
-        if line.startswith("+"):
-            sections[-1][2].append(line[1:])
-        elif line.startswith("-"):
-            sections[-1][1].append(line[1:])
-    return [(p, "\n".join(old), "\n".join(new)) for p, old, new in sections]
+        if files and not line.startswith("***"):
+            files[-1][2].append(line)
+    return [(op, path, body) for op, path, body in files]
+
+
+def patch_sections(patch: str, cwd: Path) -> list[tuple[Path, str, str]]:
+    """Split a Codex apply_patch body into (path, removed text, added text) per file."""
+    return [(path, "\n".join(r[1:] for r in body if r[:1] == "-"), "\n".join(r[1:] for r in body if r[:1] == "+"))
+            for _, path, body in patch_files(patch, cwd)]
 
 
 def edit_targets(payload: dict) -> list[tuple[Path, list[str], list[str]]]:

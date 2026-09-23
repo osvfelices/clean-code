@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,7 @@ CORE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CORE))
 import clean_code as cc
 from clean_code import rules as rules_module
+from clean_code import source as source_module
 
 ENTRY = CORE / "clean_check.py"
 
@@ -19,6 +21,17 @@ def rules_for(name: str, text: str) -> set[str]:
     path = ROOT / name
     path.write_text(text)
     return {v.rule for v in cc.check_file(path, CFG, ROOT)}
+
+
+def claude_payload(path: Path, hunks: list, session: str = "") -> dict:
+    """What Claude Code sends after an edit: the hunks it applied, as structuredPatch rows."""
+    return {"session_id": session, "tool_name": "Edit", "tool_input": {"file_path": str(path)},
+            "tool_response": {"filePath": str(path), "structuredPatch": [{"newStart": s, "lines": rows} for s, rows in hunks]}}
+
+
+def post(payload: dict, root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload), capture_output=True,
+                          text=True, env={"CLAUDE_PROJECT_DIR": str(root), "PATH": "/usr/bin:/bin"}, cwd=str(root))
 
 
 def test_clean_file_passes():
@@ -68,8 +81,8 @@ def test_comment_form_rules():
     assert "comment-shouting" not in rules_for("w2.ts", "// derives the UPC and ISRC server-side\nconst a: number = 1;\n")
     assert "phase-label" in rules_for("x.ts", "// Thin Server Actions for Phase 3B3A distributor cutover.\nconst a: number = 1;\n")
     assert "phase-label" in rules_for("x2.ts", "// F50 imported-asset materialization\nconst a: number = 1;\n")
-    assert "phase-label" not in rules_for("x3.tsx", "// Step 1 fields stay required until the album is complete\nconst a: number = 1;\n")
-    assert "phase-label" not in rules_for("x4.tsx", "// Phase 0 of the scroll timeline runs from 0.1 to 0.38\nconst a: number = 1;\n")
+    assert "phase-label" not in rules_for("x3.ts", "// Step 1 fields stay required until the album is complete\nconst a: number = 1;\n")
+    assert "phase-label" not in rules_for("x4.ts", "// Phase 0 of the scroll timeline runs from 0.1 to 0.38\nconst a: number = 1;\n")
     header = "/**\n" + "".join(f" * line {i} of a long essay about the module\n" for i in range(7)) + " */\nconst a: number = 1;\n"
     assert "header-essay" in rules_for("y.ts", header)
     short = "/**\n * Owns catalog ingestion commands.\n * Byte upload lives in the API route, not here.\n */\nconst a: number = 1;\n"
@@ -92,23 +105,11 @@ def test_pre_blocks_weakening():
 
 def test_post_mode_exit_code():
     path = ROOT / "t.ts"; path.write_text("console.log(1);\n")
-    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps({"tool_input": {"file_path": str(path)}}),
-                          capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
+    payload = claude_payload(path, [(1, ["+console.log(1);"])])
+    proc = post(payload, ROOT)
     assert proc.returncode == 2 and "debug output: L1" in proc.stderr
-    again = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps({"tool_input": {"file_path": str(path)}}),
-                           capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
+    again = post(payload, ROOT)
     assert again.returncode == 2 and "still open" in again.stderr and len(again.stderr) < 80
-
-
-def test_autofix_touches_comments_only():
-    path = ROOT / "fix.ts"
-    path.write_text("// ---------- helpers ----------\n// map errors \u2014 onto the envelope \u00b7 then return\nconst s: string = \"a \u2014 b\";\nif (x) {\n  run();\n} // end if\n")
-    assert cc.autofix(path) >= 3
-    out = path.read_text()
-    assert "----" not in out and "// end" not in out
-    assert "// map errors, onto the envelope; then return" in out
-    assert 'const s: string = "a \u2014 b";' in out
-
 
 
 PATCH = """*** Begin Patch
@@ -177,30 +178,84 @@ def test_shouting_is_emphasis_not_identifiers():
 
 def test_post_mode_scopes_to_edited_lines():
     path = ROOT / "legacy.ts"
-    path.write_text("console.log('old');\nconst keep: number = 1;\nconst b = c as any;\n")
-    payload = {"session_id": "scope1", "tool_input": {"file_path": str(path), "old_string": "const keep: number = 1;", "new_string": "const b = c as any;"}}
-    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
-                          capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
-    assert "loose type" in proc.stderr and ": L3" in proc.stderr, proc.stderr
+    path.write_text("console.log('old');\nconst b = c as any;\n")
+    payload = claude_payload(path, [(1, [" console.log('old');", "-const keep: number = 1;", "+const b = c as any;"])], "scope1")
+    proc = post(payload, ROOT)
+    assert "loose type: write the real type: L2" in proc.stderr, proc.stderr
     assert "debug output" not in proc.stderr, proc.stderr
 
 
-def test_unlocatable_edit_still_checks_whole_file():
+def test_an_edit_that_cannot_be_located_is_left_unchecked_not_billed_whole():
     path = ROOT / "whole.ts"
     path.write_text("console.log('x');\n")
-    payload = {"session_id": "scope2", "tool_input": {"file_path": str(path)}}
-    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
-                          capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(ROOT), "PATH": "/usr/bin:/bin"})
-    assert "debug output: L1" in proc.stderr
+    kind, said = outcome(post({"session_id": "scope2", "tool_name": "Edit", "tool_input": {"file_path": str(path)}}, ROOT))
+    assert kind == "context" and "whole.ts not checked" in said and "debug output" not in said, said
 
 
-def test_malformed_config_is_reported_not_swallowed():
-    bad = Path(tempfile.mkdtemp())
-    (bad / ".clean-code.json").write_text('{"ignore": ["a",]}')
-    (bad / "x.ts").write_text("const a = b as any;\n")
-    proc = subprocess.run([sys.executable, str(ENTRY), "files", "x.ts"],
-                          capture_output=True, text=True, cwd=str(bad), env={"PATH": "/usr/bin:/bin"})
-    assert "ignoring malformed" in proc.stderr, proc.stderr
+INVALID_CONFIGS = [
+    ('{"ignore": ["a",]}', "not valid JSON"),
+    ("[]", "must be a JSON object"),
+    ('{"disableRule": ["debug-output"]}', 'unknown key "disableRule"'),
+    ('{"disableRules": ["coment-shouting"]}', 'unknown rule "coment-shouting"'),
+    ('{"disableRules": "debug-output"}', '"disableRules" must be a list of rule ids'),
+    ('{"ignore": null}', '"ignore" must be a list of glob patterns'),
+    ('{"ignore": ["", "a"]}', '"ignore" must be a list of glob patterns'),
+    ('{"allowConsole": [1]}', '"allowConsole" must be a list of glob patterns'),
+    ('{"allowTodo": "false"}', '"allowTodo" must be true or false'),
+    ('{"maxCommentRatio": "0.3"}', '"maxCommentRatio" must be a number above 0 and at most 1'),
+    ('{"maxCommentRatio": 0}', '"maxCommentRatio" must be a number above 0 and at most 1'),
+    ('{"maxArguments": 2.5}', '"maxArguments" must be a whole number from 1 to 20'),
+    ('{"maxArguments": true}', '"maxArguments" must be a whole number from 1 to 20'),
+    ('{"maxArguments": 0}', '"maxArguments" must be a whole number from 1 to 20'),
+]
+
+
+def test_an_invalid_configuration_is_named_and_nothing_is_checked():
+    for text, reason in INVALID_CONFIGS:
+        box = Path(tempfile.mkdtemp())
+        (box / ".clean-code.json").write_text(text)
+        (box / "x.ts").write_text("console.log(1);\n")
+        sweep = subprocess.run([sys.executable, str(ENTRY), "files", "x.ts"], capture_output=True, text=True,
+                               cwd=str(box), env={"PATH": "/usr/bin:/bin"})
+        assert sweep.returncode == 1 and reason in sweep.stdout and "not checked" in sweep.stdout, (text, sweep)
+        assert "Traceback" not in sweep.stderr and "debug output" not in sweep.stdout, sweep
+        kind, said = outcome(post(claude_payload(box / "x.ts", [(1, ["+console.log(1);"])], f"cfg-{len(text)}"), box))
+        assert kind == "context" and "invalid clean-code configuration" in said and reason in said, (text, said)
+
+
+def test_a_valid_configuration_is_accepted_whether_or_not_tree_sitter_is_installed():
+    box = Path(tempfile.mkdtemp())
+    (box / ".clean-code.json").write_text('{"disableRules": ["flag-argument", "debug-output"], "maxArguments": 6,'
+                                          ' "maxCommentRatio": 0.5, "allowTodo": true, "ignore": [], "allowConsole": []}')
+    (box / "x.ts").write_text("console.log(1);\n// TODO: later\n")
+    sweep = subprocess.run([sys.executable, str(ENTRY), "files", "x.ts"], capture_output=True, text=True,
+                           cwd=str(box), env={"PATH": "/usr/bin:/bin"})
+    assert (sweep.returncode, sweep.stdout.strip()) == (0, "clean"), sweep
+    (box / ".clean-code.json").write_text("{}")
+    assert cc.Config.load(box).max_arguments == 5
+
+
+def test_the_configuration_is_the_one_at_the_project_root():
+    outer = Path(tempfile.mkdtemp()).resolve()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    (outer / ".clean-code.json").write_text('{"ignore": ["**/legacy/**"]}')
+    (outer / "legacy").mkdir()
+    (outer / "legacy/old.ts").write_text("console.log(1);\n")
+    (outer / "src/deep").mkdir(parents=True)
+
+    def sweep(cwd: Path, target: str):
+        return subprocess.run([sys.executable, str(ENTRY), "files", target], capture_output=True, text=True,
+                              cwd=str(cwd), env={"PATH": "/usr/bin:/bin"})
+
+    assert sweep(outer / "src/deep", "../../legacy/old.ts").stdout.strip() == "clean", "a subdirectory uses the root config"
+    link = outer.parent / (outer.name + "-link")
+    link.symlink_to(outer)
+    assert sweep(link / "src", "../legacy/old.ts").stdout.strip() == "clean", "a symlinked path uses the same config"
+    inner = outer / "vendor-repo"
+    subprocess.run(["git", "init", "-q", str(inner)], check=True)
+    (inner / "legacy").mkdir()
+    (inner / "legacy/old.ts").write_text("console.log(1);\n")
+    assert "debug output" in sweep(inner, "legacy/old.ts").stdout, "a nested repository has its own root, not the outer config"
 
 
 DEFECTS = [
@@ -214,7 +269,7 @@ DEFECTS = [
     ("ts", "// const dead: number = 1;", "commented-out"),
     ("ts", 'const apiKey = "sk_live_abcdefghijklmnop";', "secret"),
     ("ts", "it.skip('x', () => {});", "test"),
-    ("py", "except ValueError:\n    pass", "empty catch"),
+    ("py", "try:\n    run()\nexcept ValueError:\n    pass", "empty catch"),
 ]
 
 
@@ -225,21 +280,17 @@ def test_recall_on_the_edited_line():
         host = "\n".join(f"v{j} = {j}" if ext == "py" else f"export const v{j}: number = {j};" for j in range(300))
         path = box / f"host{i}.{ext}"
         path.write_text(host + "\n" + bad + "\n")
-        payload = {"session_id": f"recall{i}", "tool_input": {"file_path": str(path), "old_string": "absent", "new_string": bad}}
-        proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
-                              capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"})
+        proc = post(claude_payload(path, [(301, ["+" + l for l in bad.split("\n")])], f"recall{i}"), box)
         assert needle.lower() in proc.stderr.lower(), f"{bad!r} went unreported: {proc.stderr!r}"
 
 
-def test_autofixable_defect_is_removed_rather_than_reported():
+def test_a_banner_on_the_edited_line_is_reported_and_the_file_left_alone():
     box = Path(tempfile.mkdtemp())
     path = box / "banner.ts"
     path.write_text("export const a: number = 1;\n// ---------- section ----------\n")
-    payload = {"session_id": "autofix1", "tool_input": {"file_path": str(path), "old_string": "absent", "new_string": "// ---------- section ----------"}}
-    proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=json.dumps(payload),
-                          capture_output=True, text=True, env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"})
-    assert proc.returncode == 0 and proc.stderr == ""
-    assert "----" not in path.read_text()
+    proc = post(claude_payload(path, [(1, [" export const a: number = 1;", "+// ---------- section ----------"])], "banner1"), box)
+    assert proc.returncode == 2 and "banner comment: delete: L2" in proc.stderr, proc.stderr
+    assert "----" in path.read_text()
 
 
 def test_generated_files_are_not_linted():
@@ -287,15 +338,6 @@ def test_a_rule_only_runs_on_its_languages():
     assert "closing-brace-comment" not in rules_for("lang.py", "x = 1  # end of thing\n")
 
 
-def test_unknown_disabled_rule_is_reported():
-    box = Path(tempfile.mkdtemp())
-    (box / ".clean-code.json").write_text('{"disableRules": ["coment-shouting"]}')
-    (box / "x.ts").write_text("// NEVER do this\nconst a: number = 1;\n")
-    proc = subprocess.run([sys.executable, str(ENTRY), "files", "x.ts"],
-                          capture_output=True, text=True, cwd=str(box), env={"PATH": "/usr/bin:/bin"})
-    assert "unknown rules: coment-shouting" in proc.stderr, proc.stderr
-
-
 def test_rules_and_explain_are_queryable():
     listing = subprocess.run([sys.executable, str(ENTRY), "rules"], capture_output=True, text=True)
     assert listing.returncode == 0 and "weak-type" in listing.stdout
@@ -312,23 +354,85 @@ def test_ast_rules_register_only_when_tree_sitter_is_present():
     assert registered == (ast_ids if ast_rules.AVAILABLE else set())
 
 
-def test_too_many_arguments_and_flag_argument():
+def ast_rules_for(name: str, text: str, edited=None) -> dict:
+    path = ROOT / name
+    path.write_text(text)
+    return {v.rule: (v.hits, v.incomplete) for v in cc.check_file(path, CFG, ROOT, edited)
+            if v.rule in ("too-many-arguments", "flag-argument")}
+
+
+def test_too_many_arguments_counts_what_every_caller_must_pass():
     if not __import__("clean_code.ast_rules", fromlist=["AVAILABLE"]).AVAILABLE:
         return
-    wide = "export function go(a: A, b: B, c: C, d: D, e: E): void {}\n"
-    assert "too-many-arguments" in rules_for("wide.ts", wide)
-    narrow = "export function go(a: A, b: B, c: C, d: D): void {}\n"
-    assert "too-many-arguments" not in rules_for("narrow.ts", narrow)
-    optional = "def make(name, label, message, languages=None, whole_file=False):\n    pass\n"
-    assert "too-many-arguments" not in rules_for("optional.py", optional)
-    rest = "export function log(a: A, b: B, c: C, d: D, ...rest: E[]): void {}\n"
-    assert "too-many-arguments" not in rules_for("rest.ts", rest)
+    flagged = {
+        "wide.ts": "export function go(a: A, b: B, c: C, d: D, e: E): void {}\n",
+        "ctor.ts": "class S { constructor(a: A, b: B, c: C, d: D, e: E) {} }\n",
+        "method.js": "class S { go(a, b, c, d, e) {} }\n",
+        "arrow.ts": "export const go = (a: A, b: B, c: C, d: D, e: E) => a;\n",
+        "wide.py": "def go(a, b, c, d, e):\n    pass\n",
+        "keyword_only.py": "def go(a, b, *, c, d, e):\n    pass\n",
+        "method.py": "class S:\n    def go(self, a, b, c, d, e):\n        pass\n",
+        "lambda.py": "go = lambda a, b, c, d, e: a\n",
+    }
+    for name, text in flagged.items():
+        assert "too-many-arguments" in ast_rules_for(name, text), name
+    clean = {
+        "narrow.ts": "export function go(a: A, b: B, c: C, d: D): void {}\n",
+        "defaults.ts": "export function go(a: A, b: B, c: C, d: D, e = 1, f?: F): void {}\n",
+        "rest.ts": "export function go(a: A, b: B, c: C, d: D, ...rest: E[]): void {}\n",
+        "options.ts": "export function go({ a, b, c, d, e }: Options): void {}\n",
+        "this.ts": "export function go(this: Window, a: A, b: B, c: C, d: D): void {}\n",
+        "callback.ts": "items.reduce((a, b, c, d, e) => a, 0);\n",
+        "override.ts": "class S extends B { override go(a: A, b: B, c: C, d: D, e: E) {} }\n",
+        "defaults.py": "def go(name, label, message, languages=None, whole_file=False):\n    pass\n",
+        "variadic.py": "def go(a, b, c, d, *args, **kwargs):\n    pass\n",
+        "positional.py": "def go(a, b, /, c, d):\n    pass\n",
+        "callback.py": "items.sort(key=lambda a, b, c, d, e: a)\n",
+    }
+    for name, text in clean.items():
+        assert "too-many-arguments" not in ast_rules_for(name, text), name
 
-    assert "flag-argument" in rules_for("flag.ts", "export function render(deep: boolean): void {}\n")
-    assert "flag-argument" in rules_for("flag.py", "def check(strict=False):\n    pass\n")
-    assert "flag-argument" not in rules_for("setter.ts", "class A { setVisible(visible: boolean): void {} }\n")
-    options = "export function run({ labelId, strict }: { labelId: string; strict: boolean }): void {}\n"
-    assert "flag-argument" not in rules_for("opts.ts", options)
+
+def test_a_boolean_parameter_is_a_flag_only_where_it_picks_a_branch():
+    if not __import__("clean_code.ast_rules", fromlist=["AVAILABLE"]).AVAILABLE:
+        return
+    flagged = {
+        "branch.ts": "export function render(deep: boolean) {\n  if (deep) { walk(); }\n  return draw();\n}\n",
+        "ternary.js": "export function render(deep = false) {\n  return deep ? walk() : draw();\n}\n",
+        "branch.py": "def render(compact: bool):\n    if compact:\n        return small()\n    return large()\n",
+        "default.py": "def check(strict=False):\n    return exact() if strict else loose()\n",
+        "handler.ts": "function handleToggle(open: boolean) {\n  if (open) { track(); }\n  save(open);\n}\n",
+    }
+    for name, text in flagged.items():
+        assert "flag-argument" in ast_rules_for(name, text), name
+    clean = {
+        "data.ts": "export function remember(checked: boolean) {\n  return save(checked);\n}\n",
+        "stored.py": "class A:\n    def keep(self, flag: bool):\n        self.flag = flag\n",
+        "setter.ts": "class A { setVisible(visible: boolean): void { if (visible) show(); } }\n",
+        "options.ts": "export function run({ strict }: { strict: boolean }) {\n  if (strict) { exact(); }\n}\n",
+        "callback.tsx": "export const P = () => <input onChange={(checked: boolean) => { if (checked) save(); }} />;\n",
+        "inline.ts": "rows.filter((keep: boolean) => { if (keep) { return true; } return false; });\n",
+        "override.ts": "class S extends B { override show(open: boolean) { if (open) run(); } }\n",
+    }
+    for name, text in clean.items():
+        assert "flag-argument" not in ast_rules_for(name, text), name
+    [message] = [r.message for r in cc.RULES if r.id == "flag-argument"]
+    assert "split" not in message.lower() or "if" in message.lower()
+
+
+def test_an_ast_rule_does_not_judge_lines_its_parser_could_not_read():
+    if not __import__("clean_code.ast_rules", fromlist=["AVAILABLE"]).AVAILABLE:
+        return
+    text = "const rows = await sql<{ n: number }[]>`select 1`;\nexport function go(a, b, c, d, e) {}\n"
+    found = ast_rules_for("gap-ast.ts", text, {1})
+    assert found["too-many-arguments"][1] and found["flag-argument"][1], found
+    assert found.get("too-many-arguments", ([], ""))[0] == [], found
+    assert ast_rules_for("gap-ast.ts", text, {2})["too-many-arguments"][0], "a function the parser did read is judged"
+
+
+def test_an_unknown_command_is_an_error():
+    proc = subprocess.run([sys.executable, str(ENTRY), "chek"], capture_output=True, text=True)
+    assert proc.returncode == 1 and "unknown command chek" in proc.stderr, proc
 
 
 def test_prose_may_quote_a_setting_it_does_not_change():
@@ -354,10 +458,10 @@ def test_a_regex_literal_is_not_a_comment():
 
 def test_an_apostrophe_in_prose_does_not_open_a_string():
     jsx = "<p>add to fans' library</p>\n{/* Quick Stats */}\n// TODO: later\n"
-    assert len(cc.split_comments(jsx, ".tsx")[1]) == 2
+    assert reading(jsx, ".tsx") == ([(2, "/* Quick Stats */"), (3, "// TODO: later")] if source_module.get_parser else "abstained")
     code = "const a = 'real string'; // after\nconst b = \"don't\"; // inside quotes\n"
     assert len(cc.split_comments(code, ".ts")[1]) == 2
-    py = 'x = "a"  # comment\ns = "unterminated\ny = 1  # another\n'
+    py = 'x = "a"  # comment\ns = "it\'s"  # another\n'
     assert len(cc.split_comments(py, ".py")[1]) == 2
 
 
@@ -373,52 +477,201 @@ FOREIGN_SETTINGS = {
 }
 
 
-def sandboxed_installer(home: Path):
-    """Point the installer at a throwaway home so a test never touches the real one."""
+def run_installer(home: Path, *args: str) -> tuple:
+    """The installer in-process against a throwaway home; never the real one."""
+    import contextlib
+    import io
     from clean_code import install as inst
-    inst.HOME = home
-    inst.CORE = home / ".clean-code"
-    inst.CHECK = inst.CORE / "clean_check.py"
-    for key, a in list(inst.AGENTS.items()):
-        inst.AGENTS[key] = inst.Agent(
-            a.name, home / a.marker.name, home / a.settings.relative_to(Path.home()),
-            a.pre_matcher, a.post_matcher,
-            tuple((rel, home / tgt.relative_to(Path.home())) for rel, tgt in a.placements), a.next_step)
-    return inst
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = inst.main(list(args), home=home)
+    return code, out.getvalue() + err.getvalue()
+
+
+def snapshot(home: Path) -> dict:
+    return {str(p.relative_to(home)): (p.read_bytes() if p.is_file() else "dir") for p in sorted(home.rglob("*"))}
+
+
+def fresh_home(name: str = "home") -> Path:
+    home = Path(tempfile.mkdtemp()) / name
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir()
+    return home
+
+
+def hook_groups(settings: Path, event: str) -> list:
+    return json.loads(settings.read_text()).get("hooks", {}).get(event, [])
+
+
+def ours(home: Path, settings: Path, event: str) -> list:
+    from clean_code.install import group_is_ours
+    return [g for g in hook_groups(settings, event) if group_is_ours(g, home / ".clean-code/clean_check.py")]
 
 
 def test_installer_merges_and_removes_only_its_own_hooks():
-    home = Path(tempfile.mkdtemp())
-    (home / ".claude").mkdir()
-    (home / ".claude/settings.json").write_text(json.dumps(FOREIGN_SETTINGS))
-    inst = sandboxed_installer(home)
+    home = fresh_home()
     settings = home / ".claude/settings.json"
-
-    def groups(event="PreToolUse"):
-        return json.loads(settings.read_text()).get("hooks", {}).get(event, [])
-
-    def mine(event="PreToolUse"):
-        return [g for g in groups(event) if any(str(inst.CHECK) in h["command"] for h in g["hooks"])]
-
-    def foreign():
-        return [g for g in groups() if any("somebody-elses-hook" in h["command"] for h in g["hooks"])]
-
-    assert inst.main(["--claude"]) == 0
-    assert len(mine()) == 1 and len(mine("PostToolUse")) == 1
-    assert len(foreign()) == 1
+    settings.write_text(json.dumps(FOREIGN_SETTINGS))
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    assert len(ours(home, settings, "PreToolUse")) == 1 and len(ours(home, settings, "PostToolUse")) == 1
     assert json.loads(settings.read_text())["theme"] == "dark"
-    assert (home / ".claude/settings.json.bak").is_file()
-    assert (inst.CORE / "clean_code/rules.py").is_file()
-    assert (home / ".claude/skills/clean-code/SKILL.md").is_file()
+    assert any("somebody-elses-hook" in g["hooks"][0]["command"] for g in hook_groups(settings, "PreToolUse"))
+    assert list((home / ".claude").glob("settings.json.clean-code-*.bak"))
+    assert (home / ".clean-code/clean_code/rules.py").is_file() and (home / ".claude/skills/clean-code/SKILL.md").is_file()
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    assert len(ours(home, settings, "PreToolUse")) == 1, "installing twice must not stack hooks"
+    assert run_installer(home, "--claude", "--uninstall")[0] == 0
+    assert ours(home, settings, "PreToolUse") == [] and json.loads(settings.read_text())["theme"] == "dark"
+    assert any("somebody-elses-hook" in g["hooks"][0]["command"] for g in hook_groups(settings, "PreToolUse"))
+    assert not (home / ".clean-code").exists() and not (home / ".claude/skills/clean-code").exists()
+    assert run_installer(home, "--claude", "--uninstall")[0] == 0, "uninstalling twice is not an error"
 
-    assert inst.main(["--claude"]) == 0
-    assert len(mine()) == 1, "installing twice must not stack hooks"
 
-    assert inst.main(["--claude", "--uninstall"]) == 0
-    assert mine() == [] and len(foreign()) == 1
-    assert json.loads(settings.read_text())["theme"] == "dark"
-    assert not inst.CORE.exists()
-    assert not (home / ".claude/skills/clean-code").exists()
+def test_both_agents_in_a_home_with_spaces_install_hooks_that_run():
+    home = fresh_home("home with spaces")
+    code, said = run_installer(home, "--no-parser")
+    assert code == 0 and "Claude Code: installed" in said and "Codex: installed" in said, said
+    assert "React, TSX and JSX checking: OFF" in said and "not checked" in said, said
+    [group] = ours(home, home / ".codex/hooks.json", "PostToolUse")
+    command = group["hooks"][0]["command"]
+    target = home / "project/a.ts"
+    target.parent.mkdir()
+    target.write_text("console.log(1);\n")
+    payload = json.dumps(claude_payload(target, [(1, ["+console.log(1);"])], "spaces"))
+    proc = subprocess.run(command, shell=True, input=payload, capture_output=True, text=True, cwd=str(target.parent))
+    assert proc.returncode == 2 and "debug output: L1" in proc.stderr, proc
+
+
+def test_a_malformed_settings_file_changes_nothing():
+    for broken in (".claude/settings.json", ".codex/hooks.json"):
+        home = fresh_home()
+        assert run_installer(home, "--no-parser")[0] == 0
+        (home / broken).write_text('{"hooks": {')
+        before = snapshot(home)
+        for args in (("--no-parser",), ("--uninstall",)):
+            code, said = run_installer(home, *args)
+            assert code == 1 and "is not valid JSON" in said and "Nothing was changed" in said, said
+            assert snapshot(home) == before, broken
+
+
+def test_a_permission_failure_changes_nothing():
+    if os.geteuid() == 0:
+        return
+    home = fresh_home()
+    (home / ".claude/settings.json").write_text("{}")
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    before = snapshot(home)
+    (home / ".claude").chmod(0o555)
+    try:
+        code, said = run_installer(home, "--claude", "--no-parser")
+    finally:
+        (home / ".claude").chmod(0o755)
+    assert code == 1 and "Nothing was changed" in said, said
+    assert snapshot(home) == before
+
+
+def test_a_failure_midway_through_the_swap_puts_everything_back():
+    from clean_code import install as inst
+    home = fresh_home()
+    assert run_installer(home, "--no-parser")[0] == 0
+    before = snapshot(home)
+    real, calls = inst.os.replace, []
+
+    def flaky(source, target):
+        calls.append(target)
+        if len(calls) == 9:
+            raise OSError(28, "No space left on device", str(target))
+        real(source, target)
+
+    inst.os.replace = flaky
+    try:
+        code, said = run_installer(home, "--no-parser")
+    finally:
+        inst.os.replace = real
+    assert code == 1 and "the old state is back" in said, said
+    assert snapshot(home) == before
+
+
+def test_an_interrupted_run_is_recovered_by_the_next():
+    home = fresh_home()
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    core = home / ".clean-code"
+    os.replace(core, home / ".clean-code.clean-code-old")
+    (home / ".clean-code.clean-code-new").mkdir()
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    assert (core / "clean_check.py").is_file()
+    assert not (home / ".clean-code.clean-code-old").exists() and not (home / ".clean-code.clean-code-new").exists()
+
+
+def test_a_legacy_install_is_migrated_and_foreign_stop_hooks_stay():
+    home = fresh_home()
+    legacy_core = home / ".clean-code/clean_code"
+    legacy_core.mkdir(parents=True)
+    (legacy_core / "report.py").write_text("def autofix(path):\n    path.write_text('')\n")
+    (home / ".clean-code/clean_check.py").write_text("")
+    check = home / ".clean-code/clean_check.py"
+    legacy = {"hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": f'python3 "{check}" stop'}]},
+                 {"hooks": [{"type": "command", "command": "somebody-elses-stop"}]}],
+        "PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": f'python3 "{check}" post'}]}]}}
+    (home / ".claude/settings.json").write_text(json.dumps(legacy))
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    stops = hook_groups(home / ".claude/settings.json", "Stop")
+    assert [g["hooks"][0]["command"] for g in stops] == ["somebody-elses-stop"]
+    assert len(ours(home, home / ".claude/settings.json", "PostToolUse")) == 1
+    assert "autofix" not in (legacy_core / "report.py").read_text()
+
+
+def test_a_partial_install_is_repaired_and_backups_do_not_pile_up():
+    home = fresh_home()
+    assert run_installer(home, "--no-parser")[0] == 0
+    import shutil as _shutil
+    _shutil.rmtree(home / ".clean-code")
+    for _ in range(5):
+        assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    assert (home / ".clean-code/clean_check.py").is_file()
+    assert len(list((home / ".claude").glob("settings.json.clean-code-*.bak"))) == 3
+
+
+def test_installing_one_agent_moves_every_hook_that_runs_the_shared_core():
+    home = fresh_home()
+    assert run_installer(home, "--no-parser")[0] == 0
+    codex = home / ".codex/hooks.json"
+    stale = codex.read_text().replace(json.dumps(sys.executable)[1:-1], "/gone/venv/bin/python")
+    codex.write_text(stale)
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    [group] = ours(home, codex, "PostToolUse")
+    assert "/gone/" not in group["hooks"][0]["command"] and sys.executable in group["hooks"][0]["command"]
+    assert not (home / ".agents/skills/clean-code.clean-code-new").exists()
+
+
+def test_removing_one_agent_keeps_the_core_the_other_still_uses():
+    home = fresh_home()
+    assert run_installer(home, "--no-parser")[0] == 0
+    assert run_installer(home, "--claude", "--uninstall")[0] == 0
+    assert (home / ".clean-code/clean_check.py").is_file() and ours(home, home / ".codex/hooks.json", "PostToolUse")
+    assert run_installer(home, "--codex", "--uninstall")[0] == 0
+    assert not (home / ".clean-code").exists()
+
+
+def test_a_fresh_install_says_whether_tsx_is_checked_and_means_it():
+    home = fresh_home("react home")
+    code, said = run_installer(home, "--claude")
+    assert code == 0, said
+    [group] = ours(home, home / ".claude/settings.json", "PostToolUse")
+    command = group["hooks"][0]["command"]
+    page = home / "app/page.tsx"
+    page.parent.mkdir()
+    text = "export default function Page() {\n  return <p>{console.log(1)}</p>;\n}\n"
+    page.write_text(text)
+    payload = json.dumps(claude_payload(page, [(2, ["+" + text.split("\n")[1]])], "react"))
+    proc = subprocess.run(command, shell=True, input=payload, capture_output=True, text=True, cwd=str(page.parent))
+    if "React, TSX and JSX checking: on" in said:
+        assert (home / ".clean-code/venv/bin/python").is_file() and "venv/bin/python" in command
+        assert proc.returncode == 2 and "debug output: L2" in proc.stderr, proc
+    else:
+        assert "React, TSX and JSX checking: OFF" in said and "could not set up tree-sitter" in said, said
+        assert proc.returncode == 0 and "not checked" in proc.stdout, proc
 
 
 def next_like_project() -> Path:
@@ -434,7 +687,7 @@ def next_like_project() -> Path:
 
 
 def boundary_rules(box: Path, body: str) -> set[str]:
-    path = box / "components/panel.tsx"
+    path = box / "components/panel.ts"
     path.write_text(body)
     return {v.rule for v in cc.check_file(path, cc.Config.load(box), box)}
 
@@ -464,6 +717,881 @@ def test_the_boundary_rule_leaves_correct_code_alone():
     path.write_text(server)
     assert "client-bundles-server-code" not in {v.rule for v in cc.check_file(path, cc.Config.load(box), box)}, \
         "a server module may import whatever it likes"
+
+
+READ_ONLY_FIXTURES = {
+    "lf.ts": b"// ---------- helpers ----------\n// map errors \xe2\x80\x94 onto the envelope\nif (x) {\n  run();\n} // end if\n",
+    "crlf.ts": b"// ---------- helpers ----------\r\nconst a = 1;\r\nif (a) {\r\n  run();\r\n} // end\r\n",
+    "utf8.ts": "// caf\u00e9 \u2192 na\u00efve \u00b7 r\u00e9sum\u00e9\nconst s: string = \"\u2014\";\n".encode(),
+    "marker.ts": b'const marker = "} // end";\n',
+    "sql.py": 'SQL = """SELECT a \u2014 b FROM table"""\n'.encode(),
+    "latin1.ts": b"// ---------- caf\xe9 ----------\nconsole.log(1);\n",
+}
+
+
+def test_post_mode_never_writes_the_file():
+    box = Path(tempfile.mkdtemp())
+    for name, data in READ_ONLY_FIXTURES.items():
+        path = box / name
+        path.write_bytes(data)
+        before = path.stat().st_mtime_ns
+        text = data.decode("utf-8", "replace").replace("\r\n", "\n")
+        post(claude_payload(path, [(1, ["+" + l for l in text.split("\n")])], f"read-only-{name}"), box)
+        assert path.read_bytes() == data, name
+        assert path.stat().st_mtime_ns == before, name
+
+
+def test_post_mode_leaves_a_symlink_and_its_target_alone():
+    box = Path(tempfile.mkdtemp())
+    target = box / "target.ts"
+    data = b"// ---------- helpers ----------\nif (a) {\n  run();\n} // end\n"
+    target.write_bytes(data)
+    link = box / "link.ts"
+    link.symlink_to(target)
+    text = data.decode()
+    post(claude_payload(link, [(1, ["+" + l for l in text.split("\n")])], "read-only-link"), box)
+    assert link.is_symlink() and target.read_bytes() == data
+
+
+LEGACY = "console.log('legacy');"
+
+
+def scope(path: Path, text: str, hunks: list) -> "set[int] | None":
+    path.write_text(text)
+    [(_, lines)] = cc.edited_lines(claude_payload(path, hunks))
+    return lines
+
+
+def test_scope_of_insertion_replacement_and_multiline_replacement():
+    path = ROOT / "scope.ts"
+    assert scope(path, f"{LEGACY}\nconst a = 1;\nconst c = 3;\nconst b = 2;\n",
+                 [(1, [f" {LEGACY}", " const a = 1;", "+const c = 3;", " const b = 2;"])]) == {3}
+    assert scope(path, f"{LEGACY}\nconst a = 10;\nconst b = 2;\n",
+                 [(1, [f" {LEGACY}", "-const a = 1;", "+const a = 10;", " const b = 2;"])]) == {2}
+    assert scope(path, f"{LEGACY}\nconst x = 1;\nconst y = 2;\nconst z = 3;\n{LEGACY}\n",
+                 [(1, [f" {LEGACY}", "-const a = 1;", "-const b = 2;", "+const x = 1;", "+const y = 2;", "+const z = 3;", f" {LEGACY}"])]) == {2, 3, 4}
+
+
+def test_a_deletion_introduces_no_lines_and_a_blank_line_only_itself():
+    path = ROOT / "scope-delete.ts"
+    assert scope(path, f"{LEGACY}\nconst b = 2;\n{LEGACY}\n", [(1, [f" {LEGACY}", "-const a = 1;", " const b = 2;"])]) == set()
+    assert scope(path, f"{LEGACY}\nconst a = 1;\n\nconst b = 2;\n{LEGACY}\n", [(2, [" const a = 1;", "+", " const b = 2;"])]) == {3}
+
+
+def test_identical_legacy_text_above_or_below_is_not_the_edit():
+    path = ROOT / "scope-dupes.ts"
+    above = f"{LEGACY}\nconst a = 1;\n{LEGACY}\nconst b = 2;\n{LEGACY}\n"
+    assert scope(path, above, [(2, [" const a = 1;", f"+{LEGACY}", " const b = 2;"])]) == {3}
+    below = f"{LEGACY}\nconst a = 1;\n{LEGACY}\n"
+    assert scope(path, below, [(1, [f"+{LEGACY}", " const a = 1;", f" {LEGACY}"])]) == {1}
+
+
+def test_identical_new_lines_at_two_places_are_each_the_edit():
+    path = ROOT / "scope-twice.ts"
+    text = "const a = 1;\nconst c = 3;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst c = 3;\n"
+    hunks = [(1, [" const a = 1;", "+const c = 3;", " const b = 2;"]), (4, ["+const c = 3;", " const d = 4;", " const c = 3;"])]
+    assert scope(path, text, hunks) == {2, 4}
+
+
+def test_whitespace_different_duplicates_are_different_lines():
+    path = ROOT / "scope-indent.ts"
+    assert scope(path, "  console.log('x');\nconsole.log('x');\n", [(1, ["   console.log('x');", "+console.log('x');"])]) == {2}
+
+
+def test_a_file_moved_since_the_edit_makes_scope_unavailable():
+    path = ROOT / "scope-moved.ts"
+    formatted = "const a = 1;\n\nconst c = 3;\n"
+    assert scope(path, formatted, [(1, [" const a = 1;", "+const c = 3;"])]) is None
+
+
+def test_a_payload_without_coordinates_makes_scope_unavailable():
+    path = ROOT / "scope-bare.ts"
+    path.write_text(f"{LEGACY}\n")
+    bare = {"tool_name": "Edit", "tool_input": {"file_path": str(path), "old_string": "x", "new_string": LEGACY}}
+    assert cc.edited_lines(bare) == [(path, None)]
+
+
+def test_a_created_file_is_new_on_every_line():
+    path = ROOT / "scope-new.ts"
+    text = "const a = 1;\nconst b = 2;\n"
+    path.write_text(text)
+    created = {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": text},
+               "tool_response": {"type": "create", "filePath": str(path), "content": text, "structuredPatch": []}}
+    assert cc.edited_lines(created) == [(path, {1, 2, 3})]
+    unchanged = {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": text},
+                 "tool_response": {"type": "update", "filePath": str(path), "content": text, "structuredPatch": []}}
+    assert cc.edited_lines(unchanged) == [(path, set())]
+
+
+REAL_CLAUDE_EDIT = {
+    "hook_event_name": "PostToolUse", "tool_name": "Edit",
+    "tool_input": {"file_path": "f.ts", "old_string": "const b = 2;", "new_string": "const b = 20;\nconst bb = 21;", "replace_all": False},
+    "tool_response": {
+        "filePath": "f.ts", "oldString": "const b = 2;", "newString": "const b = 20;\nconst bb = 21;",
+        "originalFile": "const a = 1;\nconst b = 2;\nconst c = 3;\n",
+        "structuredPatch": [{"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 4,
+                             "lines": [" const a = 1;", "-const b = 2;", "+const b = 20;", "+const bb = 21;", " const c = 3;"]}],
+        "userModified": False, "replaceAll": False},
+}
+
+
+def test_the_payload_claude_code_really_sends_is_scoped():
+    box = Path(tempfile.mkdtemp())
+    (box / "f.ts").write_text("const a = 1;\nconst b = 20;\nconst bb = 21;\nconst c = 3;\n")
+    assert cc.edited_lines({**REAL_CLAUDE_EDIT, "cwd": str(box)}) == [(box / "f.ts", {2, 3})]
+
+
+def codex_payload(patch: str, cwd: Path) -> dict:
+    return {"tool_name": "apply_patch", "cwd": str(cwd), "tool_input": {"command": patch}}
+
+
+CODEX_UPDATE = """*** Begin Patch
+*** Update File: svc.ts
+@@
+ const a = 1;
++console.log('new');
+ const b = 2;
+*** End Patch"""
+
+
+def test_codex_hunks_are_located_by_their_context():
+    box = Path(tempfile.mkdtemp())
+    (box / "svc.ts").write_text("console.log('new');\nconst z = 0;\nconst a = 1;\nconsole.log('new');\nconst b = 2;\n")
+    assert cc.edited_lines(codex_payload(CODEX_UPDATE, box)) == [(box / "svc.ts", {4})]
+    deletion = "*** Begin Patch\n*** Update File: svc.ts\n@@\n const z = 0;\n-const y = 9;\n const a = 1;\n*** End Patch"
+    assert cc.edited_lines(codex_payload(deletion, box)) == [(box / "svc.ts", set())]
+    added = "*** Begin Patch\n*** Add File: fresh.ts\n+const a = 1;\n+const b = 2;\n*** Delete File: gone.ts\n*** End Patch"
+    (box / "fresh.ts").write_text("const a = 1;\nconst b = 2;\n")
+    assert cc.edited_lines(codex_payload(added, box)) == [(box / "fresh.ts", {1, 2})]
+
+
+def test_ambiguous_codex_context_makes_scope_unavailable_unless_anchored():
+    box = Path(tempfile.mkdtemp())
+    block = "const a = 1;\nconsole.log('new');\nconst b = 2;\n"
+    (box / "svc.ts").write_text("function first() {\n" + block + "}\nfunction second() {\n" + block + "}\n")
+    assert cc.edited_lines(codex_payload(CODEX_UPDATE, box)) == [(box / "svc.ts", None)]
+    anchored = CODEX_UPDATE.replace("@@\n", "@@ function second() {\n")
+    assert cc.edited_lines(codex_payload(anchored, box)) == [(box / "svc.ts", {8})]
+
+
+def test_legacy_defects_around_an_edit_stay_legacy():
+    box = Path(tempfile.mkdtemp())
+    path = box / "around.ts"
+    path.write_text(f"{LEGACY}\nconst a = 1;\nconst x = y as any;\nconst b = 2;\n{LEGACY}\n")
+    proc = post(claude_payload(path, [(2, [" const a = 1;", "+const x = y as any;", " const b = 2;"])], "around"), box)
+    assert proc.returncode == 2 and "loose type: write the real type: L3" in proc.stderr, proc.stderr
+    assert "debug output" not in proc.stderr, proc.stderr
+
+
+def test_repeating_a_legacy_defect_reports_only_the_new_copy():
+    box = Path(tempfile.mkdtemp())
+    path = box / "repeat.ts"
+    path.write_text(f"{LEGACY}\nconst a = 1;\n{LEGACY}\nconst b = 2;\n{LEGACY}\n")
+    proc = post(claude_payload(path, [(2, [" const a = 1;", f"+{LEGACY}", " const b = 2;"])], "repeat"), box)
+    assert proc.returncode == 2 and "debug output: L3\n" in proc.stderr + "\n", proc.stderr
+
+
+def test_removing_a_defect_reports_nothing():
+    box = Path(tempfile.mkdtemp())
+    path = box / "removed.ts"
+    path.write_text(f"{LEGACY}\nconst a = 1;\n{LEGACY}\n")
+    proc = post(claude_payload(path, [(1, [f" {LEGACY}", " const a = 1;", "-const x = y as any;", f" {LEGACY}"])], "removed"), box)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+JS_FIXTURE = r"""const a = 'it\'s // not'; // c1
+const b = "say \"hi\" /* not */"; // c2
+const r = /[/*]+\/\/x/g; // c3
+const d = total / count / 2; // c4
+const u = "https://example.com/path"; // c5
+const t = `// not ${a} /* not */`; // c6
+const m = `
+  // not a comment
+`; /* c7 */
+const s = `a ${ /* c8 */ b } c`;
+const n = `x ${ a ? `inner // not ${ b /* c9 */ }` : "" } y`; // c10
+const w = `${`${`deep`}`}`; // c11
+/*
+ * c12
+ */
+const url = `https://x.y/${a}`; // c13
+const p = [
+  /^(.)\1+$/, // c14
+  /^(123)+/, // c15
+];
+const e = h.replace(/</g, "&lt;").replace(/>/g, "&gt;"); // c16
+const k = ready && !failed
+  /* c17 */
+  ? 1
+  : 2;
+"""
+
+
+JS_COMMENTS = [(1, "// c1"), (2, "// c2"), (3, "// c3"), (4, "// c4"), (5, "// c5"), (6, "// c6"), (9, "/* c7 */"),
+               (10, "/* c8 */"), (11, "/* c9 */"), (11, "// c10"), (12, "// c11"), (13, "/*\n * c12\n */"), (16, "// c13"),
+               (18, "// c14"), (19, "// c15"), (21, "// c16"), (23, "/* c17 */")]
+
+
+TSX_FIXTURE = """export function P({ items }: { items: string[] }) {
+  return (
+    <div title="don't // not" data-x='a "b" c'>
+      <p>it's {/* c1 */} don't</p>
+      {/* c2 */}
+      {items.map((i) => <li key={i}>{i /* c3 */}</li>)}
+      <a href="//cdn.example.com/x">docs at https://example.com/x</a>
+    </div>
+  ); // c4
+}
+export const Q = (props) => <Item {...props} />; // c5
+"""
+
+
+TSX_COMMENTS = [(4, "/* c1 */"), (5, "/* c2 */"), (6, "/* c3 */"), (9, "// c4"), (11, "// c5")]
+
+
+def found(text: str, ext: str) -> list:
+    return [(c.line, c.text) for c in cc.split_comments(text, ext)[1]]
+
+
+def scanned(text: str, ext: str) -> list:
+    return [(c.line, c.text) for c in source_module.assemble(text, source_module.scan_comments(text, ext))[1]]
+
+
+def test_js_comments_are_exact_around_strings_regexes_and_templates():
+    for ext in (".ts", ".js", ".mjs", ".cjs"):
+        assert found(JS_FIXTURE, ext) == JS_COMMENTS, ext
+        assert scanned(JS_FIXTURE, ext) == JS_COMMENTS, ext
+
+
+def test_jsx_comments_are_exact_with_a_parser():
+    if not source_module.get_parser:
+        return
+    assert found(TSX_FIXTURE, ".tsx") == TSX_COMMENTS
+    assert found(TSX_FIXTURE.replace(": { items: string[] }", ""), ".jsx") == TSX_COMMENTS
+
+
+def test_an_unclosed_quote_does_not_shift_later_lines():
+    assert scanned("const s = 'a\\\nb';\n// after\n", ".ts") == [(3, "// after")]
+    assert scanned("const a = `x ${b} y\n// inside\n", ".ts") == []
+
+
+PY_FIXTURE = "\n".join([
+    '"""Module docstring."""',
+    "import re",
+    "S1 = 'it\\'s # not'",
+    'S2 = "say \\"# not\\""',
+    'SQL = """SELECT a # not',
+    'FROM t"""',
+    "M = '''multi",
+    "line'''  # c1",
+    'F = f"{S1} # not {S2!r}"  # c2',
+    "def f():",
+    '    """Function docstring."""',
+    "    return re  # c3",
+    "class C:",
+    "    '''Class docstring.'''",
+    '    x = """not a docstring"""',
+    "",
+])
+
+
+def test_python_docstrings_are_comments_and_assigned_strings_are_not():
+    assert found(PY_FIXTURE, ".py") == [(1, "Module docstring."), (8, "# c1"), (9, "# c2"), (11, "Function docstring."),
+                                        (12, "# c3"), (14, "Class docstring.")]
+    code = cc.split_comments(PY_FIXTURE, ".py")[0]
+    assert "SELECT a # not" in code[4] and code[10].strip() == "" and 'not a docstring' in code[14]
+
+
+def test_python_that_does_not_parse_is_reported_unchecked_not_clean():
+    try:
+        cc.split_comments("def f(:\n    pass\n", ".py")
+    except cc.Unparsable as exc:
+        assert "line 1" in str(exc)
+    else:
+        raise AssertionError("broken Python was read as if it parsed")
+    box = Path(tempfile.mkdtemp())
+    path = box / "broken.py"
+    path.write_text("print('x')\ndef f(:\n")
+    kind, said = outcome(post(claude_payload(path, [(1, ["+print('x')", "+def f(:"])], "broken"), box))
+    assert kind == "context" and "not checked" in said and "debug output" not in said, said
+    sweep = subprocess.run([sys.executable, str(ENTRY), "files", str(path)], capture_output=True, text=True, cwd=str(box),
+                           env={"PATH": "/usr/bin:/bin"})
+    assert sweep.returncode == 1 and "not checked" in sweep.stdout, sweep
+
+
+def test_a_closing_brace_inside_a_string_is_not_a_comment():
+    assert "closing-brace-comment" not in rules_for("brace-string.ts", 'const marker = "} // end";\n')
+    assert "closing-brace-comment" in rules_for("brace-comment.ts", "if (x) {\n  run();\n} // end if\n")
+
+
+def outcome(proc: subprocess.CompletedProcess) -> tuple[str, str]:
+    """What the agent receives: exit 2 hands it stderr, exit 0 only JSON additionalContext from stdout."""
+    if proc.returncode == 2:
+        return "report", proc.stderr
+    assert proc.returncode == 0, proc
+    if not proc.stdout:
+        assert proc.stderr == "", proc.stderr
+        return "silent", ""
+    context = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert context["hookEventName"] == "PostToolUse" and proc.stderr == "", proc
+    return "context", context["additionalContext"]
+
+
+def test_a_checked_clean_edit_says_nothing_and_a_violation_is_reported():
+    box = Path(tempfile.mkdtemp())
+    clean = box / "clean.ts"
+    clean.write_text("const a = 1;\n")
+    assert outcome(post(claude_payload(clean, [(1, ["+const a = 1;"])], "matrix-clean"), box)) == ("silent", "")
+    dirty = box / "dirty.ts"
+    dirty.write_text("console.log(1);\n")
+    kind, text = outcome(post(claude_payload(dirty, [(1, ["+console.log(1);"])], "matrix-dirty"), box))
+    assert kind == "report" and "debug output: L1" in text, text
+
+
+def test_an_edit_that_cannot_be_located_reaches_the_agent_as_not_checked():
+    box = Path(tempfile.mkdtemp())
+    moved = box / "moved.ts"
+    moved.write_text("const a = 1;\n\nconsole.log(1);\n")
+    kind, text = outcome(post(claude_payload(moved, [(1, [" const a = 1;", "+console.log(1);"])], "matrix-moved"), box))
+    assert kind == "context" and "moved.ts not checked" in text and "could not be located" in text, text
+    block = "const a = 1;\nconsole.log('new');\nconst b = 2;\n"
+    (box / "svc.ts").write_text(block + block)
+    kind, text = outcome(post({**codex_payload(CODEX_UPDATE, box), "session_id": "matrix-codex"}, box))
+    assert kind == "context" and "svc.ts not checked" in text, text
+
+
+def test_unparsable_python_reaches_the_agent_as_not_checked():
+    box = Path(tempfile.mkdtemp())
+    path = box / "broken.py"
+    path.write_text("print('x')\ndef f(:\n")
+    kind, text = outcome(post(claude_payload(path, [(1, ["+print('x')", "+def f(:"])], "matrix-py"), box))
+    assert kind == "context" and "broken.py not checked" in text and "not valid Python" in text, text
+
+
+def test_jsx_without_a_parser_that_accepts_it_reaches_the_agent_as_not_checked():
+    box = Path(tempfile.mkdtemp())
+    path = box / "amp.tsx"
+    text = "export const A = () => <p>Catalog & Revenue</p>;\n// TODO: real defect\n"
+    path.write_text(text)
+    kind, said = outcome(post(claude_payload(path, [(1, ["+" + l for l in text.split("\n")])], "matrix-jsx"), box))
+    assert kind == "context" and "amp.tsx not checked" in said and "JSX" in said, said
+
+
+def test_a_malformed_hook_payload_reaches_the_agent_as_not_checked():
+    box = Path(tempfile.mkdtemp())
+    for bad in ("not json", "[1, 2]"):
+        proc = subprocess.run([sys.executable, str(ENTRY), "post"], input=bad, capture_output=True, text=True,
+                              env={"CLAUDE_PROJECT_DIR": str(box), "PATH": "/usr/bin:/bin"}, cwd=str(box))
+        kind, said = outcome(proc)
+        assert kind == "context" and "not checked" in said and "hook input" in said, said
+
+
+def test_a_report_carries_the_not_checked_note_for_other_files():
+    box = Path(tempfile.mkdtemp())
+    (box / "fresh.ts").write_text("console.log(1);\n")
+    patch = "*** Begin Patch\n*** Add File: fresh.ts\n+console.log(1);\n*** Update File: gone.ts\n@@\n-a\n+b\n*** End Patch"
+    kind, said = outcome(post({**codex_payload(patch, box), "session_id": "matrix-both"}, box))
+    assert kind == "report" and "debug output: L1" in said and "gone.ts not checked" in said, said
+
+
+REAL_CODEX_PATCH = {
+    "hook_event_name": "PostToolUse", "model": "gpt-5.6-sol", "permission_mode": "bypassPermissions",
+    "tool_name": "apply_patch", "tool_use_id": "call_1", "turn_id": "t1", "session_id": "codex-real",
+    "tool_input": {"command": "*** Begin Patch\n*** Update File: {path}\n@@\n-const a = 1;\n+console.log(2);\n*** End Patch"},
+    "tool_response": "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess. Updated the following files:\nM {path}\n",
+}
+
+
+def test_the_payload_codex_really_sends_is_scoped_and_reported():
+    box = Path(tempfile.mkdtemp())
+    path = box / "f.ts"
+    path.write_text("console.log(2);\n")
+    payload = json.loads(json.dumps(REAL_CODEX_PATCH).replace("{path}", str(path)))
+    assert cc.edited_lines({**payload, "cwd": str(box)}) == [(path, {1})]
+    kind, said = outcome(post({**payload, "cwd": str(box)}, box))
+    assert kind == "report" and "debug output: L1" in said, said
+
+
+def reading(text: str, ext: str):
+    """The comments one file yields, or "abstained" when no reader can be trusted with it."""
+    try:
+        return found(text, ext)
+    except cc.Unparsable:
+        return "abstained"
+
+
+SOL_FALSE_NEGATIVE = "export const F = () => <p>Run ```bash to start</p>;\n// TODO: real defect\n"
+SOL_FALSE_COMMENT = "export const G = () => <p>see https://example.com/TODO</p>;\n"
+
+
+def test_the_sol_jsx_reproducers_are_read_right_or_not_at_all():
+    parser = bool(source_module.get_parser)
+    assert reading(SOL_FALSE_NEGATIVE, ".tsx") == ([(2, "// TODO: real defect")] if parser else "abstained")
+    assert reading(SOL_FALSE_COMMENT, ".tsx") == ([] if parser else "abstained")
+
+
+JSX_TEXT = """export function Page({ items }: { items: string[] }) {
+  return (
+    <>
+      <p>It's a fan's page, don't panic.</p>
+      <p>Run ```bash``` or `npm i` first</p>
+      <p>See https://example.com/a//b and /* not a comment */ here</p>
+      <p>Braces {"{"} and {"}"} and &amp; &lt;tag&gt; &copy; 2026</p>
+      <p>
+        Multiline text: console.log("example") as any TODO
+        apiKey = "abcdefghijklmnop"
+      </p>
+      <ul>{items.map((i) => <li key={i}>{i /* real one */}</li>)}</ul>
+      {/* real two */}
+    </>
+  );
+}
+"""
+
+
+def test_jsx_text_of_every_shape_is_text_to_the_parser():
+    if not source_module.get_parser:
+        assert reading(JSX_TEXT, ".tsx") == "abstained"
+        return
+    assert found(JSX_TEXT, ".tsx") == [(12, "/* real one */"), (13, "/* real two */")]
+    assert rules_for("jsx-text.tsx", JSX_TEXT) == set()
+
+
+def test_a_hashbang_is_neither_comment_nor_regex():
+    text = "#!/usr/bin/env node\nconst a = 1; // real\n"
+    for ext in (".ts", ".js", ".mjs"):
+        assert found(text, ext) == scanned(text, ext) == [(2, "// real")], ext
+        path = ROOT / f"bang{ext}"
+        path.write_text(text)
+        assert cc.load_source(path).executable_lines[0] == "#!/usr/bin/env node", ext
+
+
+def test_typescript_and_jsx_free_javascript_are_still_read_without_a_parser():
+    text = "export function useCount(n) {\n  return n < 10 ? n : 10; // capped\n}\nconst x = f(a) << 2;\n"
+    for ext in (".js", ".mjs", ".cjs", ".ts"):
+        assert scanned(text, ext) == [(2, "// capped")], ext
+    assert scanned("const x = f<T>(a) << 2; // generic\n", ".ts") == [(1, "// generic")]
+
+
+GRAMMAR_GAP_TS = [
+    "const rows = await sql<{ n: number }[]>`select 1 // not`; // real\n",
+    "const real = await importOriginal<typeof import('x')>(); // real\n",
+    "let entries: import('fs').Dirent[] = []; // real\n",
+    "abstract class R extends P {\n  public abstract override errorType: string; // real\n}\n",
+]
+
+
+def test_valid_typescript_the_grammar_rejects_is_read_exactly_by_the_scanner():
+    for i, text in enumerate(GRAMMAR_GAP_TS):
+        path = ROOT / f"gap{i}.ts"
+        path.write_text(text)
+        src = cc.load_source(path)
+        assert [(c.line, c.text) for c in src.comments] == [(text.count("\n") - (1 if "abstract" in text else 0), "// real")], text
+        assert src.model == "lexical", text
+
+
+def test_code_rules_do_not_read_strings_templates_or_jsx_text():
+    sql = 'SQL = """\nprint("this is SQL text")\nconsole.log("text")\nTODO:\napiKey = "abcdefghijklmnop"\n"""\n'
+    assert rules_for("sql-text.py", sql) == set()
+    docs = 'const docs = `\nconsole.log("example")\nas any\napiKey = "abcdefghijklmnop"\n`;\n'
+    assert rules_for("docs-text.ts", docs) == set()
+    assert rules_for("as-any-text.ts", 'const example = "as any";\n') == set()
+    assert rules_for("type-text.ts", 'type Id = `as any-${string}`;\n') == set()
+    assert rules_for("more-text.ts", 'const a = "hi! there";\nconst b = "it.skip(\'x\')";\nconst c = "try { a(); } catch (e) {}";\nconst r = /as any/;\n') == set()
+    if source_module.get_parser:
+        assert rules_for("jsx-text2.tsx", 'export const P = () => <p>console.log("example") as any TODO</p>;\n') == set()
+
+
+def test_the_same_constructs_in_code_are_still_found():
+    ts = 'console.log("real");\nconst value = input as any;\nconst apiKey = "abcdefghijklmnop";\nconst s = `${value as any}`;\n'
+    path = ROOT / "real-code.ts"
+    path.write_text(ts)
+    found_rules = {v.rule: v.hits for v in cc.check_file(path, CFG, ROOT)}
+    assert set(found_rules) == {"debug-output", "weak-type", "hardcoded-secret"}, found_rules
+    assert [cc.line_of(h) for h in found_rules["weak-type"]] == [2, 4]
+    py = 'print("real")\napi_key = "abcdefghijklmnop"\ntry:\n    run()\nexcept ValueError:\n    pass\n'
+    assert rules_for("real-code.py", py) == {"debug-output", "hardcoded-secret", "swallowed-error"}
+
+
+def test_a_secret_needs_a_name_in_code_and_a_whole_literal():
+    assert "hardcoded-secret" not in rules_for("sec1.ts", '// const apiKey = "abcdefghijklmnop";\nconst a = 1;\n')
+    assert "hardcoded-secret" in rules_for("sec2.ts", 'const apiKey = "abcdefghijklmnop"; // rotated weekly\n')
+    assert "hardcoded-secret" in rules_for("sec6.ts", 'const apiKey: string = "abcdefghijklmnop";\n')
+    assert "hardcoded-secret" not in rules_for("sec3.ts", 'const docs = `apiKey = "abcdefghijklmnop"`;\n')
+    assert "hardcoded-secret" not in rules_for("sec4.py", 'NOTE = "api_key = \'abcdefghijklmnop\'"\n')
+    assert "hardcoded-secret" in rules_for("sec5.py", 'api_key = "abcdefghijklmnop"  # from the vendor portal\n')
+
+
+JSX_CONTEXTS = [
+    "export function f() {\n  throw <p>Run ```bash to start</p>;\n}\n// TODO: real defect\n",
+    "export const v = void <Component />;\n// TODO: real defect\n",
+    "export const d = delete <Component />;\n// TODO: real defect\n",
+    "export const t = typeof <Component />;\n// TODO: real defect\n",
+    "export const F = () => <>fragment https://example.com/TODO</>;\n// TODO: real defect\n",
+    "export function Card() {\n  return <div className=\"card\">it's here</div>;\n}\n// TODO: real defect\n",
+]
+
+
+def test_tsx_and_jsx_are_read_only_by_a_parser_that_accepts_them():
+    for text in JSX_CONTEXTS + [SOL_FALSE_NEGATIVE]:
+        for ext in (".tsx", ".jsx"):
+            if source_module.get_parser:
+                assert found(text, ext)[-1][1] == "// TODO: real defect", (ext, text)
+            else:
+                assert reading(text, ext) == "abstained", (ext, text)
+    assert reading(SOL_FALSE_COMMENT, ".tsx") == ([] if source_module.get_parser else "abstained")
+    assert reading("export const n = 1; // no JSX at all\n", ".tsx") == (
+        [(1, "// no JSX at all")] if source_module.get_parser else "abstained")
+
+
+def test_a_tsx_edit_without_a_parser_reaches_the_agent_as_not_checked():
+    box = Path(tempfile.mkdtemp())
+    path = box / "throw.tsx"
+    text = JSX_CONTEXTS[0]
+    path.write_text(text)
+    kind, said = outcome(post(claude_payload(path, [(1, ["+" + l for l in text.split("\n")])], "tsx-throw"), box))
+    if source_module.get_parser:
+        assert kind == "report" and "TODO/FIXME: do it or remove: L4" in said, said
+    else:
+        assert kind == "context" and "throw.tsx not checked" in said and "tree-sitter" in said, said
+
+
+def test_the_js_scanner_abstains_unless_a_less_than_follows_an_operand():
+    for text in JSX_CONTEXTS + ["const x = cond ? < div /> : null;\n", "return (\n  <div/>\n);\n"]:
+        for ext in (".js", ".mjs", ".cjs"):
+            try:
+                source_module.scan_comments(text, ext)
+            except cc.Unparsable as exc:
+                assert "JSX" in str(exc)
+            else:
+                raise AssertionError(f"the scanner read possible JSX in {ext}: {text!r}")
+    operators = ("for (let i = 0; i<n; i++) {} // a\nif (a < b) x = y << 2 <= z; // b\n"
+                 "const s = 'x' < t, r = f(1) < g[2]; // c\nconst n = this < that; // d\n")
+    assert scanned(operators, ".js") == [(1, "// a"), (2, "// b"), (3, "// c"), (4, "// d")]
+
+
+def test_debug_calls_are_found_anywhere_in_executable_code():
+    real = ('console.log("real");\nconst x = ready && console.log("real");\nconst m = `result: ${console.log("real")}`;\n'
+            'run(console.debug("real"));\n')
+    path = ROOT / "debug-real.ts"
+    path.write_text(real)
+    [debug] = [v for v in cc.check_file(path, CFG, ROOT) if v.rule == "debug-output"]
+    assert [cc.line_of(h) for h in debug.hits] == [1, 2, 3, 4]
+    fake = ("const a = \"console.log('example')\";\nconst b = `console.log(\"example\")`;\nconst r = /console.log\\(/;\n"
+            "logger.print(x);\n")
+    assert "debug-output" not in rules_for("debug-fake.ts", fake)
+    assert "debug-output" not in rules_for("debug-fake.py", "def print(self):\n    return 1\nblueprint(x)\n")
+    if source_module.get_parser:
+        assert "debug-output" in rules_for("debug-jsx.tsx", 'export const P = () => <p>{console.log("real")}</p>;\n')
+        assert "debug-output" not in rules_for("debug-jsx-text.tsx", 'export const P = () => <p>console.log("example")</p>;\n')
+
+
+def test_f_string_fields_are_code_and_their_text_is_data():
+    assert "skipped-test" in rules_for("fs1.py", "value = f\"{it.skip('x')}\"\n")
+    assert "hardcoded-secret" in rules_for("fs2.py", "value = f\"{foo(api_key='abcdefghijklmnop')}\"\n")
+    assert "debug-output" in rules_for("fs3.py", "value = f\"prefix {print('real')} suffix\"\n")
+    text = ("a = f\"print('x') {name} it.skip('y')\"\nb = f\"{{print('x')}} {value:>{width}}\"\n"
+            "c = rf\"\\d{n} print(\"\nd = f\"{name!r:>10} api_key = 'abcdefghijklmnop'\"\n"
+            "e = (f\"one {x} print('z')\"\n     f\"two {y}\")\nf = f\"{ {'k': 'print(1)'}['k'] }\"\n")
+    assert rules_for("fs-text.py", text) == set()
+
+
+def test_an_f_string_field_older_pythons_cannot_locate_is_not_checked():
+    nested = "value = f\"{', '.join(f'{v}' for v in values)}\"\n"
+    multiline = 'value = f"""\n{print("real")}\n"""\n'
+    if sys.version_info >= (3, 12):
+        assert rules_for("fs-nested.py", nested) == set()
+        assert "debug-output" in rules_for("fs-multi.py", multiline)
+        return
+    for name, text in (("fs-nested.py", nested), ("fs-multi.py", multiline)):
+        try:
+            rules_for(name, text)
+        except cc.Unparsable as exc:
+            assert "f-string" in str(exc), exc
+        else:
+            raise AssertionError(f"{name} was read although its f-string field cannot be located")
+
+
+def test_a_hook_object_that_names_no_edit_reaches_the_agent_as_not_checked():
+    box = Path(tempfile.mkdtemp())
+    for payload in ({}, {"tool_name": "Edit", "tool_input": {}}, {"tool_name": "Edit", "tool_input": "x"},
+                    {"tool_name": "apply_patch", "tool_input": {"command": "not a patch"}},
+                    {"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** End Patch"}}):
+        proc = post(payload, box)
+        assert (proc.returncode, proc.stderr) == (0, ""), proc
+        kind, said = outcome(proc)
+        assert kind == "context" and said == "clean-code: not checked, the hook input names no edit to check", said
+
+
+def test_a_valid_edit_that_introduces_nothing_is_silent():
+    box = Path(tempfile.mkdtemp())
+    path = box / "quiet.ts"
+    path.write_text(f"{LEGACY}\n\nconst b = 2;\n")
+    deletion = claude_payload(path, [(1, [f" {LEGACY}", "-const a = 1;", " ", " const b = 2;"])], "quiet-delete")
+    blank = claude_payload(path, [(1, [f" {LEGACY}", "+", " const b = 2;"])], "quiet-blank")
+    for payload in (deletion, blank):
+        proc = post(payload, box)
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), proc
+
+
+BOUNDARY = "client module reaches a server-only package"
+
+
+def edit(box: Path, relative: str, text: str, edited: list, session: str) -> tuple:
+    """Write a file as an edit left it and post the hook payload claiming exactly the edited lines."""
+    path = box / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    lines = text.split("\n")
+    return outcome(post(claude_payload(path, [(n, ["+" + lines[n - 1]]) for n in edited], session), box))
+
+
+def test_an_edited_server_only_import_in_a_client_is_reported_on_its_line():
+    box = next_like_project()
+    text = '"use client";\nimport Redis from "ioredis";\nexport const P = () => Redis;\n'
+    kind, said = edit(box, "components/direct.ts", text, [2], "bnd-direct")
+    assert kind == "report" and f"{BOUNDARY}: L2" in said, said
+    kind, said = edit(box, "components/legacy.ts", text + "export const Q = 1;\n", [4], "bnd-legacy")
+    assert kind == "silent", said
+
+
+def test_adding_use_client_makes_every_existing_import_accountable():
+    box = next_like_project()
+    kind, said = edit(box, "components/turned.ts", '"use client";\nimport Redis from "ioredis";\nexport const P = () => Redis;\n',
+                      [1], "bnd-directive")
+    assert kind == "report" and f"{BOUNDARY}: L1" in said, said
+
+
+def test_type_only_imports_are_not_runtime_edges():
+    box = next_like_project()
+    for i, line in enumerate(['import type { Redis } from "ioredis";', 'import { type Redis } from "ioredis";',
+                              'import { type Redis, type Cluster } from "ioredis";', 'export type { Redis } from "ioredis";']):
+        kind, said = edit(box, f"components/types{i}.ts", f'"use client";\n{line}\nexport const P = 1;\n', [2], f"bnd-type{i}")
+        assert kind == "silent", (line, said)
+    kind, said = edit(box, "components/mixed.ts", '"use client";\nimport { type Redis, Cluster } from "ioredis";\nexport const P = Cluster;\n',
+                      [2], "bnd-mixed")
+    assert kind == "report" and f"{BOUNDARY}: L2" in said, said
+
+
+def test_runtime_edges_of_every_form_are_followed():
+    box = next_like_project()
+    forms = ['import "ioredis";', 'export { default } from "ioredis";', 'export * from "../lib/redis";',
+             'const m = await import("ioredis");', 'const r = require("ioredis");',
+             'import {\n  TTL_MS,\n} from "../lib/presence";']
+    for i, form in enumerate(forms):
+        text = f'"use client";\n{form}\nexport const P = 1;\n'
+        edited = [3] if "TTL_MS" in form else [2]
+        kind, said = edit(box, f"components/form{i}.ts", text, edited, f"bnd-form{i}")
+        assert kind == "report" and BOUNDARY in said, (form, said)
+
+
+def test_a_path_of_any_depth_is_found_and_a_cycle_ends():
+    box = next_like_project()
+    (box / "lib/a.ts").write_text('import { b } from "./b";\nexport const a = b;\n')
+    (box / "lib/b.ts").write_text('import { c } from "./c";\nimport { a } from "./a";\nexport const b = c;\n')
+    (box / "lib/c.ts").write_text('import { d } from "./d/index";\nexport const c = d;\n')
+    (box / "lib/d").mkdir()
+    (box / "lib/d/index.ts").write_text('import { TTL_MS } from "../presence";\nexport const d = TTL_MS;\n')
+    kind, said = edit(box, "components/deep.ts", '"use client";\nimport { a } from "../lib/a";\nexport const P = a;\n', [2], "bnd-deep")
+    assert kind == "report" and f"{BOUNDARY}: L2" in said, said
+    (box / "lib/loop1.ts").write_text('import { two } from "./loop2";\nexport const one = two;\n')
+    (box / "lib/loop2.ts").write_text('import { one } from "./loop1";\nexport const two = one;\n')
+    kind, said = edit(box, "components/loop.ts", '"use client";\nimport { one } from "../lib/loop1";\nexport const P = one;\n', [2], "bnd-loop")
+    assert kind == "silent", said
+
+
+def test_an_edit_below_a_client_is_reported_where_the_new_edge_is():
+    box = next_like_project()
+    (box / "lib/format.ts").write_text("export const format = (n: number) => String(n);\n")
+    (box / "components/view.ts").write_text('"use client";\nimport { format } from "../lib/format";\nexport const V = format;\n')
+    text = 'import { redis } from "./redis";\nexport const format = (n: number) => String(n) + redis;\n'
+    kind, said = edit(box, "lib/format.ts", text, [1], "bnd-below")
+    assert kind == "report" and f"{BOUNDARY}: L1" in said, said
+    kind, said = edit(box, "lib/unused.ts", text, [1], "bnd-unreached")
+    assert kind == "silent", said
+
+
+def test_a_server_action_ends_the_path():
+    box = next_like_project()
+    kind, said = edit(box, "components/action.ts", '"use client";\nimport { read } from "../actions/read";\nexport const P = read;\n',
+                      [2], "bnd-action")
+    assert kind == "silent", said
+
+
+def test_only_builtins_nextjs_cannot_polyfill_are_server_only():
+    box = next_like_project()
+    for i, (spec, bad) in enumerate([("fs", True), ("node:fs", True), ("fs/promises", True), ("child_process", True),
+                                     ("server-only", True), ("next/headers", True), ("path", False), ("crypto", False),
+                                     ("http", False), ("node:path", False), ("react", False)]):
+        kind, said = edit(box, f"components/builtin{i}.ts", f'"use client";\nimport "{spec}";\nexport const P = 1;\n', [2], f"bnd-b{i}")
+        assert (kind == "report") == bad, (spec, said)
+
+
+def test_an_installed_package_with_a_browser_build_is_taken_at_its_word():
+    box = next_like_project()
+    (box / "node_modules/pg").mkdir(parents=True)
+    (box / "node_modules/pg/package.json").write_text('{"name": "pg", "browser": "./lib/browser.js"}')
+    kind, said = edit(box, "components/pg.ts", '"use client";\nimport pg from "pg";\nexport const P = pg;\n', [2], "bnd-pg")
+    assert kind == "silent", said
+    # Turning off one native submodule is not a browser build of the package.
+    (box / "node_modules/pg/package.json").write_text('{"name": "pg", "browser": {"./lib/native": false}}')
+    kind, said = edit(box, "components/pg2.ts", '"use client";\nimport pg from "pg";\nexport const P = pg;\n', [2], "bnd-pg2")
+    assert kind == "report", said
+
+
+def test_aliases_come_from_the_project_config():
+    box = next_like_project()
+    (box / "src/lib").mkdir(parents=True)
+    (box / "src/lib/db.ts").write_text('import { Pool } from "pg";\nexport const db = new Pool();\n')
+    (box / "tsconfig.json").write_text('{\n  // comments and trailing commas are allowed here\n  "compilerOptions": {\n'
+                                       '    "paths": { "@/*": ["./src/*"], },\n  },\n}\n')
+    kind, said = edit(box, "src/app/page.ts", '"use client";\nimport { db } from "@/lib/db";\nexport const P = db;\n', [2], "bnd-alias")
+    assert kind == "report" and f"{BOUNDARY}: L2" in said, said
+
+
+def test_an_edge_that_cannot_be_resolved_is_not_checked_rather_than_clean():
+    box = next_like_project()
+    for i, line in enumerate(['import { db } from "@/lib/db";', 'import { x } from "./missing";', 'const m = await import(name);']):
+        kind, said = edit(box, f"components/unknown{i}.ts", f'"use client";\n{line}\nexport const P = 1;\n', [2], f"bnd-unk{i}")
+        assert kind == "context" and "client-bundles-server-code not checked" in said, (line, said)
+
+
+def test_a_graph_larger_than_the_budget_is_not_checked_rather_than_clean():
+    from clean_code import boundary
+    box = next_like_project()
+    for i in range(6):
+        (box / f"lib/chain{i}.ts").write_text(f'import {{ v }} from "./chain{i + 1}";\nexport const v = 1;\n')
+    (box / "lib/chain6.ts").write_text("export const v = 1;\n")
+    path = box / "components/chain.ts"
+    path.write_text('"use client";\nimport { v } from "../lib/chain0";\nexport const P = v;\n')
+    budget = boundary.MAX_MODULES
+    boundary.MAX_MODULES = 3
+    try:
+        [found] = [v for v in cc.check_file(path, CFG, box, {2}) if v.rule == "client-bundles-server-code"]
+    finally:
+        boundary.MAX_MODULES = budget
+    assert found.incomplete and not found.hits, found
+
+
+def test_the_grammars_the_installer_provides_are_used():
+    try:
+        import tree_sitter_typescript  # noqa: F401
+    except ImportError:
+        return
+    assert source_module.get_parser is not None
+    assert source_module.parsed_reading("export const A = () => <p>it's</p>; // c\n", "tsx").comments == [(36, 40, "// c")]
+
+
+def test_base_url_makes_a_bare_specifier_a_local_module():
+    box = next_like_project()
+    (box / "tsconfig.json").write_text('{"compilerOptions": {"baseUrl": "src"}}')
+    (box / "src/server").mkdir(parents=True)
+    (box / "src/store").mkdir()
+    (box / "src/lib.ts").write_text('import Redis from "ioredis";\nexport const thing = new Redis();\n')
+    (box / "src/server/db.ts").write_text('import { Pool } from "pg";\nexport const db = new Pool();\n')
+    (box / "src/store/index.ts").write_text('import Redis from "ioredis";\nexport const store = new Redis();\n')
+    (box / "src/react.ts").write_text('import Redis from "ioredis";\nexport default Redis;\n')
+    for i, spec in enumerate(["lib", "server/db", "store", "react"]):
+        kind, said = edit(box, f"src/client{i}.ts", f'"use client";\nimport thing from "{spec}";\nexport const P = thing;\n',
+                          [2], f"base-url-{i}")
+        assert kind == "report" and f"{BOUNDARY}: L2" in said, (spec, said)
+    kind, said = edit(box, "src/client9.ts", '"use client";\nimport { useState } from "zustand";\nexport const P = useState;\n',
+                      [2], "base-url-package")
+    assert kind == "silent", said
+
+
+def test_an_edited_index_module_is_protected_however_a_client_names_it():
+    for i, spec in enumerate(["../lib/dir", "../lib/dir/index", "../lib/dir/index.ts", "@/lib/dir"]):
+        box = next_like_project()
+        (box / "tsconfig.json").write_text('{"compilerOptions": {"paths": {"@/*": ["./*"]}}}')
+        (box / "lib/dir").mkdir()
+        (box / "lib/dir/index.ts").write_text("export const v = 1;\n")
+        (box / "components/view.ts").write_text(f'"use client";\nimport {{ v }} from "{spec}";\nexport const V = v;\n')
+        text = 'import Redis from "ioredis";\nexport const v = new Redis();\n'
+        kind, said = edit(box, "lib/dir/index.ts", text, [1], f"reverse-index-{i}")
+        assert kind == "report" and f"{BOUNDARY}: L1" in said, (spec, said)
+    box = next_like_project()
+    (box / "lib/dir").mkdir()
+    kind, said = edit(box, "lib/dir/index.ts", 'import Redis from "ioredis";\nexport const v = 1;\n', [1], "reverse-index-none")
+    assert kind == "silent", said
+
+
+BROWSER_FIELDS = [
+    ('{"name": "ioredis", "browser": false}', True),
+    ('{"name": "ioredis"}', True),
+    ('{"name": "ioredis", "description": "not for the browser", "keywords": ["browser"]}', True),
+    ('{"name": "ioredis", "main": "index.js", "browser": {"./index.js": false}}', True),
+    ('{"name": "ioredis", "main": "index.js", "browser": {"./lib/native.js": false}}', True),
+    ('{"name": "ioredis", "browser": "dist/browser.js"}', False),
+    ('{"name": "ioredis", "main": "./built/index.js", "browser": {"./built/index.js": "./built/browser.js"}}', False),
+    ('{"name": "ioredis", "exports": {".": {"browser": "./browser.js", "default": "./index.js"}}}', False),
+]
+
+
+def test_only_a_usable_browser_entry_exempts_a_server_only_package():
+    for i, (manifest, reported) in enumerate(BROWSER_FIELDS):
+        box = next_like_project()
+        (box / "node_modules/ioredis").mkdir(parents=True)
+        (box / "node_modules/ioredis/package.json").write_text(manifest)
+        kind, said = edit(box, "components/r.ts", '"use client";\nimport Redis from "ioredis";\nexport const P = Redis;\n',
+                          [2], f"browser-{i}")
+        assert (kind == "report") == reported, (manifest, said)
+
+
+def test_a_hook_that_only_mentions_the_checker_is_not_ours():
+    home = fresh_home()
+    check = home / ".clean-code/clean_check.py"
+    settings = {"hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": f'python3 "{check}" stop'}]},
+                 {"hooks": [{"type": "command", "command": f"echo documentation: {check}"}]}],
+        "PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": f"cat {check} | wc -l"}]}]}}
+    (home / ".claude/settings.json").write_text(json.dumps(settings))
+    assert run_installer(home, "--claude", "--no-parser")[0] == 0
+    after = json.loads((home / ".claude/settings.json").read_text())["hooks"]
+    assert [g["hooks"][0]["command"] for g in after["Stop"]] == [f"echo documentation: {check}"]
+    assert f"cat {check} | wc -l" in [g["hooks"][0]["command"] for g in after["PostToolUse"]]
+    assert len(ours(home, home / ".claude/settings.json", "PostToolUse")) == 1
+
+
+def test_a_hook_shape_the_installer_does_not_understand_stops_it_before_any_change():
+    for hooks in ({"PostToolUse": {"matcher": "Edit", "hooks": [{"type": "command", "command": "theirs"}]}},
+                  {"PostToolUse": "theirs"},
+                  {"PreToolUse": [{"matcher": "Bash", "hooks": []}], "Stop": 7},
+                  "not an object"):
+        home = fresh_home()
+        assert run_installer(home, "--codex", "--no-parser")[0] == 0
+        settings = home / ".claude/settings.json"
+        settings.write_text(json.dumps({"theme": "dark", "hooks": hooks}))
+        before = snapshot(home)
+        code, said = run_installer(home, "--no-parser")
+        assert code == 1 and "Nothing was changed" in said, (hooks, said)
+        assert snapshot(home) == before, hooks
+        settings.write_text(json.dumps({"theme": "dark"}))
+        assert run_installer(home, "--no-parser")[0] == 0
+
+
+def test_no_parser_means_no_parser_whatever_the_interpreter_has():
+    home = fresh_home("no parser")
+    code, said = run_installer(home, "--claude", "--no-parser")
+    assert code == 0 and "React, TSX and JSX checking: OFF" in said, said
+    [group] = ours(home, home / ".claude/settings.json", "PostToolUse")
+    page = home / "app/page.tsx"
+    page.parent.mkdir()
+    text = "export default function Page() {\n  return <p>{console.log(1)}</p>;\n}\n"
+    page.write_text(text)
+    payload = json.dumps(claude_payload(page, [(2, ["+" + text.split("\n")[1]])], "no-parser"))
+    proc = subprocess.run(group["hooks"][0]["command"], shell=True, input=payload, capture_output=True, text=True,
+                          cwd=str(page.parent))
+    kind, said = outcome(proc)
+    assert kind == "context" and "page.tsx not checked" in said, (proc, source_module.get_parser)
+
+
+def test_a_boolean_that_short_circuits_is_a_branch():
+    if not __import__("clean_code.ast_rules", fromlist=["AVAILABLE"]).AVAILABLE:
+        return
+    assert "flag-argument" in ast_rules_for("short.ts", "export function render(compact: boolean) {\n  return compact && one();\n}\n")
+    assert "flag-argument" in ast_rules_for("short.py", "def render(compact: bool):\n    return compact and one()\n")
+    assert "flag-argument" not in ast_rules_for("both.ts", "export function both(a: boolean, b: boolean) {\n  return save(a && b);\n}\n")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,368 @@
+{
+ "version": 1,
+ "about": "Edits with their expected outcome: rule ids, [] for clean, or \"not_checked\". expect_parser applies when tree-sitter is installed.",
+ "replay": {
+  "repository": ".",
+  "from": "f9cc7e6",
+  "to": "b2442ca"
+ },
+ "cases": [
+  {
+   "id": "ts-add-function",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n\nexport function count(items: Item[]): number {\n  return items.length;\n}\n",
+   "expect": []
+  },
+  {
+   "id": "ts-rename",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "export function total(items: Item[]): number {\n  return items.reduce((running, item) => running + item.price, 0);\n}\n",
+   "expect": []
+  },
+  {
+   "id": "ts-typed-interface",
+   "file": "src/types.ts",
+   "before": "",
+   "after": "export interface Item {\n  id: string;\n  price: number;\n}\n",
+   "expect": []
+  },
+  {
+   "id": "ts-intent-comment",
+   "file": "src/retry.ts",
+   "before": "export const MAX_RETRIES = 3;\n",
+   "after": "// The upstream API rate-limits bursts, so retries stay low.\nexport const MAX_RETRIES = 3;\n",
+   "expect": []
+  },
+  {
+   "id": "js-module",
+   "file": "lib/slug.mjs",
+   "before": "",
+   "after": "export const slug = (text) => text.toLowerCase().replace(/\\s+/g, '-');\n",
+   "expect": []
+  },
+  {
+   "id": "py-add-function",
+   "file": "app/cart.py",
+   "before": "def total(items):\n    return sum(item.price for item in items)\n",
+   "after": "def total(items):\n    return sum(item.price for item in items)\n\n\ndef count(items):\n    return len(items)\n",
+   "expect": []
+  },
+  {
+   "id": "py-docstring",
+   "file": "app/cart.py",
+   "before": "def total(items):\n    return sum(item.price for item in items)\n",
+   "after": "\"\"\"Cart arithmetic kept free of I/O so it can be tested alone.\"\"\"\ndef total(items):\n    return sum(item.price for item in items)\n",
+   "expect": []
+  },
+  {
+   "id": "tsx-component",
+   "file": "app/card.tsx",
+   "before": "",
+   "after": "export function Card({ title }: { title: string }) {\n  return <h2 className=\"card\">{title}</h2>;\n}\n",
+   "expect": "not_checked",
+   "expect_parser": []
+  },
+  {
+   "id": "tsx-edit",
+   "file": "app/card.tsx",
+   "before": "export function Card({ title }: { title: string }) {\n  return <h2 className=\"card\">{title}</h2>;\n}\n",
+   "after": "export function Card({ title }: { title: string }) {\n  return <h3 className=\"card\">{title}</h3>;\n}\n",
+   "expect": "not_checked",
+   "expect_parser": []
+  },
+  {
+   "id": "ts-console",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "export function total(items: Item[]): number {\n  console.log(\"items\", items);\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "debug-output"
+   ]
+  },
+  {
+   "id": "ts-as-any",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\nexport const raw = JSON.parse(text) as any;\n",
+   "expect": [
+    "weak-type"
+   ]
+  },
+  {
+   "id": "ts-non-null",
+   "file": "src/user.ts",
+   "before": "export const name = session.user.name;\n",
+   "after": "export const name = session!.user.name;\n",
+   "expect": [
+    "non-null-assertion"
+   ]
+  },
+  {
+   "id": "ts-ts-ignore",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// @ts-ignore\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "suppressed-check"
+   ]
+  },
+  {
+   "id": "ts-todo",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// TODO: handle discounts\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "todo-marker"
+   ]
+  },
+  {
+   "id": "ts-narration",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// Added a reducer to total the cart\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "narration-comment"
+   ]
+  },
+  {
+   "id": "ts-commented-code",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n// return items.length;\n",
+   "expect": [
+    "commented-code"
+   ]
+  },
+  {
+   "id": "ts-secret",
+   "file": "src/client.ts",
+   "before": "",
+   "after": "export const apiKey = \"sk_live_51HxYzAbCdEfGhIj\";\n",
+   "expect": [
+    "hardcoded-secret"
+   ]
+  },
+  {
+   "id": "ts-skip",
+   "file": "src/cart.test.ts",
+   "before": "",
+   "after": "it.skip('totals the cart', () => {});\n",
+   "expect": [
+    "skipped-test"
+   ]
+  },
+  {
+   "id": "ts-empty-catch",
+   "file": "src/load.ts",
+   "before": "",
+   "after": "export function load() {\n  try { read(); } catch (e) {}\n}\n",
+   "expect": [
+    "swallowed-error"
+   ]
+  },
+  {
+   "id": "ts-banner",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// ---------- helpers ----------\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "banner-comment"
+   ]
+  },
+  {
+   "id": "ts-closing-brace",
+   "file": "src/cart.ts",
+   "before": "",
+   "after": "export function f(a: number) {\n  if (a) {\n    run();\n  } // end if\n}\n",
+   "expect": [
+    "closing-brace-comment"
+   ]
+  },
+  {
+   "id": "ts-shouting",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// NEVER call this from a worker\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "comment-shouting"
+   ]
+  },
+  {
+   "id": "ts-glyph",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// totals the cart \u2014 then rounds\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "comment-typography"
+   ]
+  },
+  {
+   "id": "ts-phase",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "// Phase 3B cutover for the cart totals\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": [
+    "phase-label"
+   ]
+  },
+  {
+   "id": "ts-template-debug",
+   "file": "src/log.ts",
+   "before": "",
+   "after": "export const line = `total: ${console.log(total)}`;\n",
+   "expect": [
+    "debug-output"
+   ]
+  },
+  {
+   "id": "py-print",
+   "file": "app/cart.py",
+   "before": "def total(items):\n    return sum(item.price for item in items)\n",
+   "after": "def total(items):\n    print(items)\n    return sum(item.price for item in items)\n",
+   "expect": [
+    "debug-output"
+   ]
+  },
+  {
+   "id": "py-except-pass",
+   "file": "app/load.py",
+   "before": "",
+   "after": "def load():\n    try:\n        read()\n    except ValueError:\n        pass\n",
+   "expect": [
+    "swallowed-error"
+   ]
+  },
+  {
+   "id": "py-fstring-skip",
+   "file": "app/test_cart.py",
+   "before": "",
+   "after": "label = f\"{it.skip('x')}\"\n",
+   "expect": [
+    "skipped-test"
+   ]
+  },
+  {
+   "id": "py-secret",
+   "file": "app/client.py",
+   "before": "",
+   "after": "api_key = \"sk_live_51HxYzAbCdEfGhIj\"\n",
+   "expect": [
+    "hardcoded-secret"
+   ]
+  },
+  {
+   "id": "ts-flag",
+   "file": "src/render.ts",
+   "before": "",
+   "after": "export function render(deep: boolean) {\n  if (deep) { walk(); }\n  return draw();\n}\n",
+   "expect": [],
+   "expect_parser": [
+    "flag-argument"
+   ]
+  },
+  {
+   "id": "py-wide",
+   "file": "app/make.py",
+   "before": "",
+   "after": "def make(a, b, c, d, e):\n    return a\n",
+   "expect": [],
+   "expect_parser": [
+    "too-many-arguments"
+   ]
+  },
+  {
+   "id": "tsx-debug-in-jsx",
+   "file": "app/list.tsx",
+   "before": "export function Card({ title }: { title: string }) {\n  return <h2 className=\"card\">{title}</h2>;\n}\n",
+   "after": "export function Card({ title }: { title: string }) {\n  return <h2 className=\"card\">{console.log(title)}</h2>;\n}\n",
+   "expect": "not_checked",
+   "expect_parser": [
+    "debug-output"
+   ]
+  },
+  {
+   "id": "ts-client-server",
+   "file": "app/panel.ts",
+   "before": "",
+   "after": "\"use client\";\nimport Redis from \"ioredis\";\nexport const P = () => Redis;\n",
+   "expect": [
+    "client-bundles-server-code"
+   ]
+  },
+  {
+   "id": "ts-string-text",
+   "file": "src/docs.ts",
+   "before": "",
+   "after": "export const docs = \"console.log('example') as any\";\n",
+   "expect": []
+  },
+  {
+   "id": "ts-template-text",
+   "file": "src/docs.ts",
+   "before": "",
+   "after": "export const docs = `\nconsole.log(\"example\")\napiKey = \"abcdefghijklmnop\"\n`;\n",
+   "expect": []
+  },
+  {
+   "id": "tsx-jsx-text",
+   "file": "app/help.tsx",
+   "before": "",
+   "after": "export const Help = () => <p>console.log(\"example\") as any TODO</p>;\n",
+   "expect": "not_checked",
+   "expect_parser": []
+  },
+  {
+   "id": "py-sql-string",
+   "file": "app/query.py",
+   "before": "",
+   "after": "SQL = \"\"\"\nprint(\"this is SQL text\")\nTODO: nothing\n\"\"\"\n",
+   "expect": []
+  },
+  {
+   "id": "ts-commented-secret",
+   "file": "src/client.ts",
+   "before": "",
+   "after": "// const apiKey = \"abcdefghijklmnop\";\nexport const a = 1;\n",
+   "expect": [
+    "commented-code"
+   ]
+  },
+  {
+   "id": "ts-type-import",
+   "file": "app/panel.ts",
+   "before": "",
+   "after": "\"use client\";\nimport type { Redis } from \"ioredis\";\nexport const P = 1;\n",
+   "expect": []
+  },
+  {
+   "id": "ts-legacy-untouched",
+   "file": "src/cart.ts",
+   "before": "console.log(\"legacy\");\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "after": "console.log(\"legacy\");\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\nexport const size = 1;\n",
+   "expect": []
+  },
+  {
+   "id": "ts-remove-defect",
+   "file": "src/cart.ts",
+   "before": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\nexport const raw = x as any;\n",
+   "after": "export function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n",
+   "expect": []
+  },
+  {
+   "id": "ts-flag-as-data",
+   "file": "src/save.ts",
+   "before": "",
+   "after": "export function remember(checked: boolean) {\n  return save(checked);\n}\n",
+   "expect": []
+  },
+  {
+   "id": "py-broken",
+   "file": "app/broken.py",
+   "before": "def total(items):\n    return sum(item.price for item in items)\n",
+   "after": "def total(items):\n    return sum(item.price for item in items)\ndef half(:\n",
+   "expect": "not_checked"
+  }
+ ]
+}
