@@ -111,7 +111,9 @@ class Config:
 
 
 def matches_any(path: Path, patterns: list[str], root: Path) -> bool:
-    rel = str(path.resolve().relative_to(root.resolve())) if path.resolve().is_relative_to(root.resolve()) else str(path)
+    # Only the directory is resolved: a link is judged where it sits, and never followed to its target.
+    located, base = path.parent.resolve() / path.name, root.resolve()
+    rel = str(located.relative_to(base)) if located.is_relative_to(base) else str(path)
     rel = rel.replace(os.sep, "/")
     return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch("/" + rel, p) or fnmatch.fnmatch(path.name, p) for p in patterns)
 
