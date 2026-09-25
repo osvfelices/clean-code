@@ -4,8 +4,9 @@
 
 <p align="center"><strong>Code should leave no residue.</strong></p>
 
-<p align="center">Edit hooks for Claude Code and Codex. They hold the lines an agent just wrote to account,<br>
-leave the code that was already there alone, and say so when they cannot tell.</p>
+<p align="center">Edit hooks for Claude Code and Codex. They check the lines an agent's edits wrote, and the source<br>
+changes a shell command left in a Git worktree by the time its tool reported completion.<br>
+They leave the code that was already there alone, and say so when they cannot tell.</p>
 
 ```bash
 npx github:osvfelices/clean-code install
@@ -50,7 +51,8 @@ silence as approval.
 Before an edit lands, a second hook blocks the moves that hide a problem rather than solve it:
 removing a type annotation, turning off strict mode or a lint rule, bypassing a commit hook,
 deleting a test, editing the checker's own files. Prose is exempt, so documentation can quote a
-setting it does not change.
+setting it does not change. A shell command cannot be judged before it runs, so for shell the same
+safeguards are checked afterwards, and the agent is told to undo what it weakened.
 
 ## What it checks
 
@@ -191,6 +193,16 @@ context, never from matching text. Identical text elsewhere is not the edit, and
 introduces nothing. When the lines cannot be established, the file is not checked; it is never
 billed whole.
 
+**Shell commands are compared, not parsed.** No reading of a command says what `sed -i`, a Python
+script or a formatter will write. Before a shell command runs, the hook records the Git worktree:
+Git already holds every clean tracked file, so only dirty and untracked files are copied. Afterwards
+it compares, and each changed file's added lines go through the same rules as an edit. Work that was
+already dirty, staged or untracked is never charged to the command. A rename is only ever proven, by
+the file keeping its inode or by identical content; an unproven one is not checked, never billed whole.
+
+The hook observes the worktree at two moments, the tool's pre hook and its completion hook, and does
+not know when every process the command started has finished. Writes that occur after the tool completion event, including detached or background descendants, are outside that observation boundary. Tracked and Git-visible untracked files are covered; Git-ignored paths are outside shell coverage unless they are already tracked, and `.clean-code.json` exclusions stay unchecked as before.
+
 **Read-only.** The hook reports and never writes to the file it checks. An automatic fixer that
 cannot tell a comment from a string corrupts code, and no amount of convenience is worth that.
 
@@ -202,8 +214,14 @@ test-skip rule that a conditional skip is a platform guard.
 ## Limitations
 
 - TSX and JSX need the installer's tree-sitter environment; without it they are not checked.
-- Claude Code is checked on Edit, Write and MultiEdit, Codex on `apply_patch`. A file written by a
-  shell command is not seen.
+- Checked writers: Claude Code Edit, Write, Bash and PowerShell (failed runs included), Codex
+  `apply_patch` and shell. MCP and other tools' writes are not seen.
+- A shell command is not checked, and the hook says so, outside a Git worktree, when another shell
+  command changes the same worktree at the same time, when its tool runs it in the background, when
+  its completion hook arrives after its lease (its timeout plus five minutes; 35 minutes on Codex),
+  and for changed files over 2 MB, links out of the worktree, nested repositories, submodules and
+  renames that cannot be proven. Writes outside the worktree, to Git-ignored paths, or after the
+  completion hook, by a detached process or anything else, are not seen.
 - The boundary rule follows webpack's Node substitutions for client builds; Turbopack's are not
   verified. Package `imports` fields and package-based `extends` in tsconfig are not resolved, so
   those edges are reported as not checked. An import used only as a type but written without

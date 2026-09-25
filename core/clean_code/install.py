@@ -52,6 +52,8 @@ class Agent:
     settings: Path
     pre_matcher: str
     post_matcher: str
+    failure_matcher: str | None
+    """Tools whose failed runs still get a post check, for agents that report those on their own event."""
     placements: tuple[tuple[str, Path], ...]
     next_step: str
 
@@ -62,8 +64,9 @@ def agents(home: Path) -> dict[str, Agent]:
             name="Claude Code",
             marker=home / ".claude",
             settings=home / ".claude/settings.json",
-            pre_matcher="Edit|Write|MultiEdit|Bash",
-            post_matcher="Edit|Write|MultiEdit",
+            pre_matcher="Edit|Write|Bash|PowerShell",
+            post_matcher="Edit|Write|Bash|PowerShell",
+            failure_matcher="Bash|PowerShell",
             placements=(
                 ("skills/clean-code", home / ".claude/skills/clean-code"),
                 ("claude/commands/clean.md", home / ".claude/commands/clean.md"),
@@ -78,7 +81,8 @@ def agents(home: Path) -> dict[str, Agent]:
             marker=home / ".codex",
             settings=home / ".codex/hooks.json",
             pre_matcher="Bash|apply_patch",
-            post_matcher="apply_patch",
+            post_matcher="Bash|apply_patch",
+            failure_matcher=None,
             placements=(
                 ("skills/clean-code", home / ".agents/skills/clean-code"),
                 ("skills/clean-options", home / ".agents/skills/clean-options"),
@@ -204,8 +208,10 @@ def merged_settings(agent: Agent, check: Path, python: Path | None) -> str:
     for event in list(hooks):
         hooks[event] = [g for g in (without_ours(group, check) for group in hooks[event]) if g is not None]
     if python is not None:
-        for event, matcher, mode, timeout in (("PreToolUse", agent.pre_matcher, "pre", 10),
-                                              ("PostToolUse", agent.post_matcher, "post", 15)):
+        events = [("PreToolUse", agent.pre_matcher, "pre", 10), ("PostToolUse", agent.post_matcher, "post", 15)]
+        if agent.failure_matcher:
+            events.append(("PostToolUseFailure", agent.failure_matcher, "post", 15))
+        for event, matcher, mode, timeout in events:
             command = f'"{python}" "{check}" {mode}'
             hooks.setdefault(event, []).append({"matcher": matcher, "hooks": [{"type": "command", "command": command,
                                                                             "timeout": timeout}]})

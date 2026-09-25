@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -116,6 +117,31 @@ def confirmed(path: Path, added: dict[int, str] | None) -> set[int] | None:
     return set(added)
 
 
+def text_inside(path: Path, root: Path) -> str | None:
+    """A file's text, only when it is a regular file inside the root reached through no link; "" when absent.
+
+    Every step is checked with lstat before anything is opened, so a link is never followed out of the root.
+    """
+    target, base = Path(os.path.abspath(path)), Path(os.path.abspath(root))
+    if base not in target.parents:
+        return None
+    probe, info = base, None
+    for part in target.relative_to(base).parts:
+        probe = probe / part
+        try:
+            info = os.lstat(probe)
+        except FileNotFoundError:
+            return ""
+        except OSError:
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            return None
+    if info is None or not stat.S_ISREG(info.st_mode):
+        return None
+    lines = read_lines(target)
+    return None if lines is None else "\n".join(lines)
+
+
 def read_lines(path: Path) -> list[str] | None:
     try:
         return path.read_text(encoding="utf-8", errors="replace").split("\n")
@@ -182,25 +208,62 @@ def patch_files(patch: str, cwd: Path) -> list[tuple[str, Path, list[str]]]:
 
 def patch_sections(patch: str, cwd: Path) -> list[tuple[Path, str, str]]:
     """Split a Codex apply_patch body into (path, removed text, added text) per file."""
-    return [(path, "\n".join(r[1:] for r in body if r[:1] == "-"), "\n".join(r[1:] for r in body if r[:1] == "+"))
-            for _, path, body in patch_files(patch, cwd)]
+    return [(path, rows(body, "-"), rows(body, "+")) for _, path, body in patch_files(patch, cwd)]
 
 
-def edit_targets(payload: dict) -> list[tuple[Path, list[str], list[str]]]:
-    """Normalize Claude Code Edit/Write/MultiEdit and Codex apply_patch into (path, olds, news)."""
+def rows(body: list[str], sign: str) -> str:
+    """The text of a patch body's removed ("-") or added ("+") rows."""
+    return "\n".join(r[1:] for r in body if r[:1] == sign)
+
+
+def edit_targets(payload: dict, root: Path) -> list[tuple[Path, list[tuple[str, str]], bool]]:
+    """Normalize Claude Code Edit/Write and Codex apply_patch into (path, [(old, new)], deletes the file).
+
+    A Write replaces the whole file, so its old text is what the file holds before the write, when that
+    can be read without leaving the project. Otherwise nothing is compared.
+    """
     tool = payload.get("tool_name", "")
     inp = payload.get("tool_input", {}) or {}
     cwd = Path(payload.get("cwd") or os.getcwd())
     patch = inp.get("command", "") if isinstance(inp, dict) else ""
     if tool == "apply_patch" or (isinstance(patch, str) and "*** Begin Patch" in patch):
-        return [(p, [old], [new]) for p, old, new in patch_sections(patch, cwd)]
+        return [(path, [(rows(body, "-"), rows(body, "+"))], op == "Delete") for op, path, body in patch_files(patch, cwd)]
     target = inp.get("file_path") or inp.get("path")
     if not target:
         return []
     path = Path(target) if Path(target).is_absolute() else cwd / target
-    olds = [inp.get("old_string", "")] + [e.get("old_string", "") for e in inp.get("edits", [])]
-    news = [inp.get("new_string", ""), inp.get("content", "")] + [e.get("new_string", "") for e in inp.get("edits", [])]
-    return [(path, olds, news)]
+    if "content" in inp:
+        # Unreadable old text is empty, which no type-removal check can match.
+        return [(path, [(text_inside(path, root) or "", inp.get("content") or "")], False)]
+    edits = [inp] + [e for e in inp.get("edits", []) if isinstance(e, dict)]
+    return [(path, [(e.get("old_string", ""), e.get("new_string", "")) for e in edits], False)]
+
+
+# Test files by the naming conventions of the checked languages' usual runners.
+TEST_FILE = re.compile(r"(\.(test|spec)\.[cm]?[jt]sx?|^test_.*\.py|_test\.(py|go))$")
+
+
+def is_test_file(path: Path) -> bool:
+    return bool(TEST_FILE.search(path.name)) or "__tests__" in path.parts
+
+
+def test_deletion(path: Path) -> str | None:
+    """Why deleting this file weakens the project's safeguards, when it is a test."""
+    return f"deletes the test file {path.name}" if is_test_file(path) else None
+
+
+def weakening(path: Path, pairs: list[tuple[str, str]], root: Path) -> str | None:
+    """What a change to this file does to the project's safeguards, whether it is about to happen or already has."""
+    if path.name and matches_any(path, PROTECTED, root):
+        return f"changes {path.name}, which protects code quality"
+    # Prose can quote a setting without turning it off.
+    for _, text in ([] if path.suffix in PROSE else pairs):
+        for pattern, why in WEAKENING:
+            if text and re.search(pattern, text):
+                return f"{why} in {path.name}"
+    if path.suffix in TS_LIKE and any(type_annotations_removed(old, new) for old, new in pairs):
+        return f"removes type annotations in {path.name}"
+    return None
 
 
 def pre_check(payload: dict, root: Path) -> str | None:
@@ -214,16 +277,8 @@ def pre_check(payload: dict, root: Path) -> str | None:
             if re.search(r"\b(rm|git rm)\b.*\.(test|spec)\.(ts|tsx|js|py)\b", cmd):
                 return "Blocked: deleting a test file. Fix or rewrite the test; ask the user before removing it."
             return None
-    for path, olds, news in edit_targets(payload):
-        if path.name and matches_any(path, PROTECTED, root):
-            return f"Blocked: {path.name} protects code quality. Ask the user before changing it."
-        # Prose can quote a setting without turning it off.
-        for text in ([] if path.suffix in PROSE else news):
-            for pattern, why in WEAKENING:
-                if text and re.search(pattern, text):
-                    return f"Blocked: this edit {why}. Fix the underlying issue; if the rule is wrong, ask the user."
-        if path.suffix in TS_LIKE:
-            for old, new in zip(olds, news):
-                if type_annotations_removed(old, new):
-                    return "Blocked: this edit removes type annotations. Keep every existing type; narrow, never loosen."
+    for path, pairs, deletes in edit_targets(payload, root):
+        why = weakening(path, pairs, root) or (test_deletion(path) if deletes else None)
+        if why:
+            return f"Blocked: this edit {why}. Keep every safeguard and type; if one is wrong, ask the user."
     return None

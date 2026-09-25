@@ -5,10 +5,12 @@ import json
 import sys
 from pathlib import Path
 
+from . import boundary
 from .config import Config, ConfigError, changed_files, project_root
 from .hooks import NoEdit, edited_lines, pre_check, seen_before
 from .report import format_report
 from .rules import BY_ID, RULES, Violation, check_file
+from .snapshot import Unsupported, before, is_shell, shell_report
 from .source import Unparsable
 
 
@@ -19,9 +21,16 @@ def main(argv: list[str]) -> int:
         return install_main(argv[2:] + (["--uninstall"] if mode == "uninstall" else []))
     root = project_root()
     if mode == "pre":
-        reason = pre_check(json.load(sys.stdin), root)
+        payload = json.load(sys.stdin)
+        reason = pre_check(payload, root)
         if reason:
             print(reason, file=sys.stderr); return 2
+        if isinstance(payload, dict) and is_shell(payload):
+            try:
+                before(payload)
+            except (Unsupported, OSError) as exc:
+                # Not a reason to stop the command: its post finds no record and says it was not checked.
+                print(f"clean-code: no snapshot kept, {exc}", file=sys.stderr)
         return 0
     if mode == "rules":
         for r in RULES:
@@ -80,14 +89,21 @@ def post(raw: str, cfg: Config, root: Path) -> int:
         payload = json.loads(raw)
     except ValueError:
         payload = None
-    try:
-        edits = edited_lines(payload) if isinstance(payload, dict) else None
-    except NoEdit:
-        edits = None
+    event = payload.get("hook_event_name", "PostToolUse") if isinstance(payload, dict) else "PostToolUse"
+    unchecked: list[str] = []
+    warnings: list[str] = []
+    if isinstance(payload, dict) and is_shell(payload):
+        edits, unchecked, warnings = shell_report(payload, cfg, root)
+    else:
+        try:
+            edits = edited_lines(payload) if isinstance(payload, dict) else None
+        except NoEdit:
+            edits = None
     if edits is None:
-        return tell_agent(["not checked, the hook input names no edit to check"])
+        return tell_agent(["not checked, the hook input names no edit to check"], event)
+    # One command can change a module and what imports it; every file is checked against the graph after it.
+    boundary.GRAPHS.clear()
     results: dict[Path, list[Violation]] = {}
-    unchecked = []
     for path, lines in edits:
         if lines is None:
             unchecked.append(f"{path.name} not checked, the edited lines could not be located")
@@ -103,19 +119,20 @@ def post(raw: str, cfg: Config, root: Path) -> int:
         found = [v for v in vs if not v.incomplete]
         if found:
             results[path] = found
-    if not results:
-        return tell_agent(unchecked) if unchecked else 0
-    report = format_report(results, root)
+    if not results and not warnings:
+        return tell_agent(unchecked, event) if unchecked else 0
+    report = format_report(results, root) if results else ""
     key = Path("|".join(sorted(str(p) for p in results)))
-    if seen_before(str(payload.get("session_id", "")), key, report):
+    if results and seen_before(str(payload.get("session_id", "")), key, report):
         total = sum(max(len(v.hits), 1) for vs in results.values() for v in vs)
         names = ", ".join(p.name for p in results)
         report = f"{names}: same {total} issues still open, see previous list."
-    print("\n".join([report] + [f"clean-code: {note}" for note in unchecked]), file=sys.stderr)
+    notes = [f"clean-code: {note}" for note in warnings + unchecked]
+    print("\n".join(([report] if report else []) + notes), file=sys.stderr)
     return 2
 
 
-def tell_agent(notes: list[str]) -> int:
+def tell_agent(notes: list[str], event: str = "PostToolUse") -> int:
     context = "\n".join(f"clean-code: {note}" for note in notes)
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}))
     return 0

@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 CORE = Path(__file__).resolve().parent.parent
@@ -1033,7 +1034,7 @@ def outcome(proc: subprocess.CompletedProcess) -> tuple[str, str]:
         assert proc.stderr == "", proc.stderr
         return "silent", ""
     context = json.loads(proc.stdout)["hookSpecificOutput"]
-    assert context["hookEventName"] == "PostToolUse" and proc.stderr == "", proc
+    assert context["hookEventName"] in ("PostToolUse", "PostToolUseFailure") and proc.stderr == "", proc
     return "context", context["additionalContext"]
 
 
@@ -1592,6 +1593,864 @@ def test_a_boolean_that_short_circuits_is_a_branch():
     assert "flag-argument" in ast_rules_for("short.ts", "export function render(compact: boolean) {\n  return compact && one();\n}\n")
     assert "flag-argument" in ast_rules_for("short.py", "def render(compact: bool):\n    return compact and one()\n")
     assert "flag-argument" not in ast_rules_for("both.ts", "export function both(a: boolean, b: boolean) {\n  return save(a && b);\n}\n")
+
+
+WEAK = cc.BY_ID["weak-type"].label
+DEBUG = cc.BY_ID["debug-output"].label
+SHELL_STATE = Path(tempfile.mkdtemp())
+CALLS = iter(range(10 ** 6))
+
+
+def git_in(box: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-C", str(box),
+                    *args], check=True, capture_output=True)
+
+
+def repo(files: dict, box: "Path | None" = None) -> Path:
+    """A Git worktree with these files committed, for a shell command to change."""
+    box = box or Path(tempfile.mkdtemp()) / "repo"
+    for name, text in files.items():
+        (box / name).parent.mkdir(parents=True, exist_ok=True)
+        (box / name).write_text(text)
+    git_in(box, "init", "-q")
+    git_in(box, "add", "-A")
+    git_in(box, "commit", "-q", "-m", "start")
+    return box
+
+
+def hook(mode: str, payload: dict, box: Path, state: Path = SHELL_STATE) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(ENTRY), mode], input=json.dumps(payload), capture_output=True, text=True,
+                          env={"CLAUDE_PROJECT_DIR": str(box), "PATH": os.environ["PATH"], "TMPDIR": str(state)},
+                          cwd=str(box))
+
+
+def shell_payload(box: Path, command: str, **extra) -> dict:
+    call = next(CALLS)
+    inp = {"command": command, **extra.pop("tool_input", {})}
+    return {"session_id": f"shell-{call}", "tool_use_id": f"toolu_{call}", "tool_name": "Bash", "cwd": str(box),
+            "hook_event_name": "PreToolUse", "tool_input": inp, **extra}
+
+
+def finish(payload: dict, box: Path, code: int = 0, state: Path = SHELL_STATE) -> tuple:
+    """The post hook for a command that already ran, on the event each outcome fires."""
+    event = "PostToolUseFailure" if code and "turn_id" not in payload else "PostToolUse"
+    return outcome(hook("post", {**payload, "hook_event_name": event, "tool_response": {"exit_code": code}}, box, state))
+
+
+def shell(box: Path, command: str, **extra) -> tuple:
+    """Pre hook, the real command in the worktree, post hook: what the agent reads afterwards."""
+    payload = shell_payload(box, command, **extra)
+    assert hook("pre", payload, box).returncode == 0
+    ran = subprocess.run(command, shell=True, cwd=str(box), capture_output=True)
+    return finish(payload, box, ran.returncode)
+
+
+PY = json.dumps(sys.executable)
+
+
+def test_the_structured_pre_gaps_are_closed():
+    box = Path(tempfile.mkdtemp())
+    deletion = {"tool_name": "apply_patch", "cwd": str(box),
+                "tool_input": {"command": "*** Begin Patch\n*** Delete File: cart.test.ts\n*** End Patch"}}
+    assert "deletes the test file cart.test.ts" in cc.pre_check(deletion, box)
+    for name in ("test_cart.py", "cart_test.go", "__tests__/cart.ts", "cart.spec.tsx"):
+        deletion["tool_input"]["command"] = f"*** Begin Patch\n*** Delete File: {name}\n*** End Patch"
+        assert cc.pre_check(deletion, box), name
+    deletion["tool_input"]["command"] = "*** Begin Patch\n*** Delete File: cart.ts\n*** End Patch"
+    assert cc.pre_check(deletion, box) is None
+    typed = box / "typed.ts"
+    typed.write_text("export function load(id: string, strict: boolean): Row {\n  return rows[id];\n}\n")
+    write = {"tool_name": "Write", "tool_input": {"file_path": str(typed),
+             "content": "export function load(id, strict) {\n  return rows[id];\n}\n"}}
+    assert "removes type annotations" in cc.pre_check(write, box)
+    write["tool_input"]["content"] = typed.read_text().replace("Row {", "Row | undefined {")
+    assert cc.pre_check(write, box) is None
+
+
+def test_structured_edits_keep_their_exact_scope_beside_shell_coverage():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    (box / "a.ts").write_text("export const a = 1;\nexport const b = 2;\n")
+    assert outcome(post(claude_payload(box / "a.ts", [(2, ["+export const b = 2;"])], "st-edit"), box)) == ("silent", "")
+    (box / "w.ts").write_text("export const w = 1;\n")
+    created = {"session_id": "st-write", "tool_name": "Write", "tool_input": {"file_path": str(box / "w.ts")},
+               "tool_response": {"type": "create", "content": "export const w = 1;\n"}}
+    assert outcome(post(created, box)) == ("silent", "")
+    (box / "p.ts").write_text("console.log(1);\n")
+    patch = {"tool_name": "apply_patch", "cwd": str(box), "session_id": "st-patch",
+             "tool_input": {"command": "*** Begin Patch\n*** Add File: p.ts\n+console.log(1);\n*** End Patch"}}
+    kind, said = outcome(post(patch, box))
+    assert kind == "report" and f"{DEBUG}: L1" in said, said
+
+
+def test_every_way_a_shell_can_write_is_checked_after_it_runs():
+    box = repo({"a.ts": "export const a: number = 1;\n", "b.ts": "export const b = 2;\n"})
+    kind, said = shell(box, "sed -i.orig 's/: number = 1/ = b as any/' a.ts && rm a.ts.orig")
+    assert kind == "report" and "a.ts" in said and f"{WEAK}: L1" in said, said
+    script = "import pathlib; p = pathlib.Path('b.ts'); p.write_text(p.read_text() + 'console.log(1);\\n')"
+    kind, said = shell(box, f"{PY} -c \"{script}\"")
+    assert kind == "report" and f"{DEBUG}: L2" in said, said
+    kind, said = shell(box, "cat > fresh.ts <<'EOF'\nexport const fresh: number = 3;\nEOF")
+    assert kind == "silent", said
+    assert shell(box, "cp fresh.ts copy.ts") == ("silent", "")
+    import shutil as _shutil
+    if _shutil.which("node"):
+        kind, said = shell(box, "node -e \"require('fs').appendFileSync('fresh.ts', 'console.log(2);\\n')\"")
+        assert kind == "report" and "fresh.ts" in said and f"{DEBUG}: L2" in said, said
+
+
+def test_a_rename_adds_nothing_and_a_rename_with_an_edit_adds_only_the_edit():
+    box = repo({"legacy.ts": "console.log('legacy');\nexport const a = 1;\n", "old.ts": "console.log('old');\nexport const o = 1;\n"})
+    assert shell(box, "mv legacy.ts moved.ts") == ("silent", "")
+    kind, said = shell(box, "mv old.ts renamed.ts && printf 'console.log(1);\\n' >> renamed.ts")
+    assert kind == "report" and f"{DEBUG}: L3" in said and "L1" not in said, said
+
+
+def test_a_multi_file_command_reports_only_the_file_that_has_the_defect():
+    box = repo({"keep.ts": "export const k = 1;\n"})
+    kind, said = shell(box, "printf 'export const one = 1;\\n' > one.ts && printf 'console.log(3);\\n' > two.ts")
+    assert kind == "report" and "two.ts" in said and "one.ts" not in said, said
+
+
+def test_a_command_that_fails_after_writing_is_still_checked():
+    box = repo({"keep.ts": "export const k = 1;\n"})
+    kind, said = shell(box, "printf 'console.log(4);\\n' > failed.ts; exit 7")
+    assert kind == "report" and "failed.ts" in said and f"{DEBUG}: L1" in said, said
+
+
+def test_work_already_in_the_worktree_is_never_charged_to_the_command():
+    box = repo({"dirty.ts": "export const d = 1;\n", "staged.ts": "export const s = 1;\n", "both.ts": "export const x = 1;\n"})
+    (box / "dirty.ts").write_text("export const d = 1;\nconsole.log('legacy');\n")
+    kind, said = shell(box, "printf \"console.log('new');\\n\" >> dirty.ts")
+    assert kind == "report" and f"{DEBUG}: L3" in said and "L2" not in said, said
+    (box / "staged.ts").write_text("console.log('staged');\n")
+    git_in(box, "add", "staged.ts")
+    assert shell(box, "ls && git status --short") == ("silent", "")
+    (box / "both.ts").write_text("console.log('staged');\n")
+    git_in(box, "add", "both.ts")
+    (box / "both.ts").write_text("console.log('staged');\nconsole.log('worktree');\n")
+    assert shell(box, "printf 'export const y = 2;\\n' >> both.ts") == ("silent", "")
+    (box / "untracked.ts").write_text("console.log('untracked');\n")
+    assert shell(box, "printf 'export const u = 3;\\n' >> untracked.ts") == ("silent", "")
+    kind, said = shell(box, "printf 'export const w = v as any;\\n' > weak.ts")
+    assert kind == "report" and f"{WEAK}: L1" in said, said
+    assert shell(box, "rm dirty.ts untracked.ts") == ("silent", "")
+
+
+def test_a_commit_inside_the_command_does_not_hide_what_it_wrote():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    kind, said = shell(box, "printf 'console.log(1);\\n' >> a.ts && git -c user.name=t -c user.email=t@t commit -qam next")
+    assert kind == "report" and f"{DEBUG}: L2" in said, said
+
+
+def test_a_shell_edit_below_a_client_is_reported_at_the_new_edge():
+    box = next_like_project()
+    (box / "lib/format.ts").write_text("export const format = (n: number) => String(n);\n")
+    (box / "components/view.ts").write_text('"use client";\nimport { format } from "../lib/format";\nexport const V = format;\n')
+    repo({}, box)
+    script = ("import pathlib; p = pathlib.Path('lib/format.ts'); "
+              "p.write_text('import { redis } from \\\"./redis\\\";\\n' + p.read_text())")
+    kind, said = shell(box, f"{PY} -c \"{script}\"")
+    assert kind == "report" and "format.ts" in said and f"{BOUNDARY}: L1" in said, said
+
+
+def test_a_shell_command_that_weakens_a_safeguard_is_told_to_undo_it():
+    box = repo({"cart.test.ts": "test('x', () => {});\n", "typed.ts": "export function f(a: number, b: string): void {}\n",
+                "tsconfig.json": "{}\n"})
+    kind, said = shell(box, f"{PY} -c \"import os; os.remove('cart.test.ts')\"")
+    assert kind == "report" and "deletes the test file cart.test.ts" in said and "undo" in said, said
+    kind, said = shell(box, "sed -i.orig 's/(a: number, b: string): void/(a, b)/' typed.ts && rm typed.ts.orig")
+    assert kind == "report" and "removes type annotations" in said, said
+    loosened = json.dumps(json.dumps({"compilerOptions": {"strict": False}}))
+    kind, said = shell(box, f"printf '%s\\n' {loosened} > tsconfig.json")
+    assert kind == "report" and "strict mode" in said, said
+
+
+def test_a_read_only_command_says_nothing():
+    box = repo({"a.ts": "console.log('legacy');\n"})
+    assert shell(box, "ls -la && cat a.ts && git log --oneline") == ("silent", "")
+
+
+def test_writers_running_at_once_in_one_worktree_are_not_checked():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    first, second = shell_payload(box, "one"), shell_payload(box, "two")
+    assert hook("pre", first, box).returncode == 0 and hook("pre", second, box).returncode == 0
+    (box / "one.ts").write_text("console.log(1);\n")
+    (box / "two.ts").write_text("export const t = 2;\n")
+    for payload in (first, second):
+        kind, said = finish(payload, box)
+        assert kind == "context" and "at the same time" in said, said
+    reader = shell_payload(box, "ls")
+    other = shell_payload(box, "git status")
+    assert hook("pre", reader, box).returncode == 0 and hook("pre", other, box).returncode == 0
+    assert finish(reader, box) == ("silent", "") and finish(other, box) == ("silent", "")
+
+
+def test_a_post_without_its_snapshot_is_not_checked():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    (box / "late.ts").write_text("console.log(1);\n")
+    kind, said = finish(shell_payload(box, "printf x"), box)
+    assert kind == "context" and "no snapshot" in said, said
+    payload = shell_payload(box, "printf x")
+    del payload["tool_use_id"]
+    kind, said = finish(payload, box)
+    assert kind == "context" and "not checked" in said, said
+
+
+README = (CORE.parent / "README.md").read_text(encoding="utf-8")
+SKILL = (CORE.parent / "skills/clean-code/SKILL.md").read_text(encoding="utf-8")
+
+
+def test_writes_after_the_post_hook_are_outside_what_is_observed_and_the_docs_say_so():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    detached = "sh -c 'nohup sh -c \"sleep 1; printf \\\"console.log(5);\\\\n\\\" > late.ts\" >/dev/null 2>&1 &'"
+    assert shell(box, detached) == ("silent", ""), "nothing was written by the time the command returned"
+    for _ in range(50):
+        if (box / "late.ts").exists():
+            break
+        time.sleep(0.1)
+    assert "console.log(5)" in (box / "late.ts").read_text(), "the descendant wrote after the post hook"
+    for doc in (README, SKILL):
+        assert "after the tool completion event" in doc and "outside that observation boundary" in doc
+        assert "bounded foreground" not in doc
+    kind, said = shell(box, "printf 'export const b = 1;\\n' > b.ts", tool_input={"run_in_background": True})
+    assert kind == "context" and "background" in said, said
+
+
+def test_git_ignored_files_are_outside_shell_coverage_and_the_docs_say_so():
+    box = repo({".gitignore": "gen/\n", "a.ts": "export const a = 1;\n"})
+    (box / "gen").mkdir()
+    (box / "gen/old.ts").write_text("export const o = 1;\n")
+    command = "printf 'console.log(1);\\n' >> gen/old.ts && printf 'console.log(2);\\n' > gen/new.ts"
+    assert shell(box, command) == ("silent", "")
+    for doc in (README, SKILL):
+        assert "Git-ignored paths are outside shell coverage unless they are already tracked" in doc
+
+
+def test_a_large_file_changed_behind_the_same_size_inode_and_time_is_not_checked():
+    box = repo({"a.ts": "export const a = 1;\n", "tracked.ts": "export const t = 1;\n"})
+    for name in ("huge.ts", "tracked.ts"):
+        (box / name).write_text("export const n = 1;\n" * 150_000)
+        before = os.stat(box / name)
+        payload = shell_payload(box, "edit in place")
+        assert hook("pre", payload, box).returncode == 0
+        with open(box / name, "r+b") as handle:
+            handle.write(b"console.log(1);  ")
+        os.utime(box / name, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(box / name)
+        assert (after.st_size, after.st_ino, after.st_mtime_ns) == (before.st_size, before.st_ino, before.st_mtime_ns)
+        kind, said = finish(payload, box)
+        assert kind == "context" and f"{name} not checked" in said, (name, said)
+
+
+def test_a_large_file_left_alone_is_not_reported():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    (box / "huge.ts").write_text("export const n = 1;\n" * 150_000)
+    assert shell(box, "cat huge.ts > /dev/null") == ("silent", "")
+
+
+def test_a_moved_file_is_diffed_against_itself_however_heavily_it_was_edited():
+    body = "console.log('legacy');\n" + "".join(f"export const v{i} = {i};\n" for i in range(20))
+    box = repo({"legacy.ts": body})
+    rewrite = ("import pathlib; p = pathlib.Path('moved.ts'); first = p.read_text().split(chr(10))[0]; "
+               "p.write_text(first + chr(10) + ''.join(f'export const w{i} = {i};' + chr(10) for i in range(20)) "
+               "+ 'console.log(1);' + chr(10))")
+    kind, said = shell(box, f"mv legacy.ts moved.ts && {PY} -c \"{rewrite}\"")
+    assert kind == "report" and f"{DEBUG}: L22" in said and "L1," not in said and ": L1\n" not in said, said
+
+
+def test_a_file_moved_over_another_is_diffed_against_where_it_came_from():
+    box = repo({"a.ts": "console.log('legacy');\nexport const a = 1;\n", "b.ts": "export const b = 1;\n"})
+    assert shell(box, "mv a.ts b.ts") == ("silent", "")
+
+
+def test_copy_then_delete_of_identical_content_is_a_rename():
+    box = repo({"a.ts": "console.log('legacy');\nexport const a = 1;\n"})
+    assert shell(box, "cp a.ts c.ts && rm a.ts") == ("silent", "")
+
+
+def test_a_file_too_large_to_keep_is_not_checked_when_it_changes():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    (box / "huge.ts").write_text("export const n = 1;\n" * 150_000)
+    kind, said = shell(box, "printf 'console.log(1);\\n' >> huge.ts")
+    assert kind == "context" and "huge.ts not checked" in said and "too large" in said, said
+
+
+def test_a_link_out_of_the_worktree_is_not_followed():
+    outside = Path(tempfile.mkdtemp()) / "target.ts"
+    outside.write_text("export const t = 1;\n")
+    box = Path(tempfile.mkdtemp()) / "repo"
+    box.mkdir()
+    (box / "link.ts").symlink_to(outside)
+    repo({"a.ts": "export const a = 1;\n"}, box)
+    kind, said = shell(box, "printf 'console.log(1);\\n' >> link.ts")
+    assert kind == "context" and "link.ts not checked" in said and "link out of the worktree" in said, said
+
+
+def test_a_shell_command_outside_git_is_not_checked():
+    box = Path(tempfile.mkdtemp())
+    kind, said = shell(box, "printf 'console.log(1);\\n' > a.ts")
+    assert kind == "context" and "outside a Git worktree" in said, said
+
+
+def test_nested_repositories_are_outside_the_worktree():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    repo({"inner.ts": "export const i = 1;\n"}, box / "nested")
+    kind, said = shell(box, "printf 'console.log(1);\\n' >> nested/inner.ts")
+    assert kind == "context" and "nested not checked" in said, said
+
+
+def test_paths_with_spaces_and_unicode_are_scoped():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    kind, said = shell(box, "printf 'console.log(6);\\n' > 'my file.ts' && printf 'console.log(7);\\n' > 'café.ts'")
+    assert kind == "report" and "my file.ts" in said and "café.ts" in said, said
+
+
+def test_an_unproven_rename_is_not_checked_and_its_siblings_still_are():
+    legacy = "console.log('legacy');\nexport const x = 1;\n"
+    box = repo({"x.ts": legacy, "a.ts": "export const a = 1;\n", "b.ts": "export const a = 1;\n",
+                "sibling.ts": "export const s = 1;\n"})
+    # The copy is made before the original goes, so it cannot inherit the original's inode.
+    kind, said = shell(box, "cp x.ts x2.ts && printf 'export const z = 1;\\n' >> x2.ts && rm x.ts"
+                            " && cp a.ts c.ts && rm a.ts b.ts && printf 'console.log(8);\\n' >> sibling.ts")
+    assert kind == "report" and "sibling.ts" in said and f"{DEBUG}: L2" in said, said
+    assert "x2.ts not checked" in said and "may have become it" in said, said
+    assert "c.ts not checked" in said and "more than one deleted file" in said, said
+
+
+def test_a_new_file_beside_an_unpaired_deletion_is_not_checked_whatever_it_holds():
+    old = "".join(f"console.log('legacy {i}');\n" for i in range(30))
+    box = repo({"old.ts": old, "a.ts": "export const a = 1;\n", "b.ts": "export const b = 2;\n"})
+    kind, said = shell(box, "cp old.ts new.ts && printf 'console.log(9);\\n' > new.ts && rm old.ts")
+    assert kind == "context" and "new.ts not checked" in said and "L1" not in said, said
+    kind, said = shell(box, "cp a.ts c.ts && cp b.ts d.ts && printf 'export const c = 3;\\n' > c.ts"
+                            " && printf 'export const d = 4;\\n' > d.ts && rm a.ts b.ts")
+    assert kind == "context" and "c.ts not checked" in said and "d.ts not checked" in said, said
+    kind, said = shell(box, "printf 'console.log(10);\\n' > genuine.ts")
+    assert kind == "report" and "genuine.ts" in said and f"{DEBUG}: L1" in said, "no deletion: a new file is new"
+    assert shell(box, "rm genuine.ts") == ("silent", ""), "a deletion alone introduces nothing"
+
+
+AUDIT = r'''
+import builtins, functools, io, os, runpy, subprocess, sys
+watch, log, entry, mode = sys.argv[1:5]
+real_open, real_os_open = builtins.open, os.open
+
+
+def seen(path):
+    if isinstance(path, int):
+        return
+    full = os.path.realpath(os.path.abspath(os.fsdecode(os.fspath(path))))
+    if full == watch or full.startswith(watch + os.sep):
+        with real_open(log, "a") as out:
+            out.write(full + "\n")
+
+
+def call(real, path, *args, **kwargs):
+    if kwargs.get("follow_symlinks", True):
+        seen(path)
+    return real(path, *args, **kwargs)
+
+
+def audited(real):
+    # A partial is never bound as a method, so pathlib may keep it as a class attribute on older Pythons.
+    return functools.partial(call, real)
+
+
+builtins.open = io.open = audited(real_open)
+os.open = audited(real_os_open)
+for name in ("stat", "utime", "chmod", "truncate", "listdir", "scandir"):
+    setattr(os, name, audited(getattr(os, name)))
+real_run = subprocess.run
+
+
+def run(args, *rest, **kwargs):
+    for word in list(args) + [kwargs.get("cwd") or "."]:
+        if isinstance(word, (str, os.PathLike)) and os.sep in os.fspath(word):
+            seen(word)
+    return real_run(args, *rest, **kwargs)
+
+
+subprocess.run = run
+sys.argv = [entry, mode]
+runpy.run_path(entry, run_name="__main__")
+'''
+
+
+def audited_hook(mode: str, payload: dict, box: Path, watch: Path, state: Path) -> tuple:
+    """The hook, recording every open, stat, utime or chmod that reaches watch, links followed included."""
+    shim = Path(tempfile.mkdtemp()) / "audit.py"
+    shim.write_text(AUDIT)
+    log = shim.with_name("touched.log")
+    log.write_text("")
+    proc = subprocess.run([sys.executable, str(shim), os.path.realpath(watch), str(log), str(ENTRY), mode],
+                          input=json.dumps(payload), capture_output=True, text=True, cwd=str(box),
+                          env={"CLAUDE_PROJECT_DIR": str(box), "PATH": os.environ["PATH"], "TMPDIR": str(state)})
+    return proc, log.read_text().split()
+
+
+def untouched(path: Path) -> tuple:
+    info = os.lstat(path)
+    return path.read_bytes() if path.is_file() else None, info.st_mtime_ns, info.st_mode
+
+
+def the_record(state: Path, payload: dict) -> Path:
+    from clean_code.snapshot import record_key
+    [record] = [p for p in (state / "clean-code-snapshots").iterdir() if p.name.endswith(record_key(payload))]
+    return record
+
+
+def test_a_manifest_redirected_to_another_worktree_is_not_checked_and_never_read():
+    state = Path(tempfile.mkdtemp())
+    a, b = repo({"a.ts": "export const a = 1;\n"}), repo({"a.ts": "export const a = 1;\n"})
+    payload = shell_payload(a, "true")
+    assert hook("pre", payload, a, state).returncode == 0
+    manifest = the_record(state, payload) / "manifest.json"
+    data = json.loads(manifest.read_text())
+    data["root"] = subprocess.run(["git", "-C", str(b), "rev-parse", "--show-toplevel"], capture_output=True,
+                                  text=True).stdout.strip()
+    manifest.write_text(json.dumps(data))
+    with open(b / "a.ts", "a") as handle:
+        handle.write("console.log(44);\n")
+    before = untouched(b / "a.ts")
+    proc, touched = audited_hook("post", {**payload, "hook_event_name": "PostToolUse"}, a, b, state)
+    kind, said = outcome(proc)
+    assert kind == "context" and "another worktree" in said, said
+    assert touched == [], touched
+    assert str(b) not in said and os.path.realpath(b) not in said and untouched(b / "a.ts") == before
+
+
+def test_every_binding_field_of_a_snapshot_is_checked_before_anything_is_read():
+    outside = Path(tempfile.mkdtemp())
+    (outside / "secret.ts").write_text("console.log('outside');\n")
+
+    def rename_tag(record, data):
+        tag, rest = record.name.split(".", 1)
+        record.rename(record.with_name(f"{'f' * 16}.{rest}"))
+
+    def link_blob(record, data):
+        (record / "blobs/0").unlink()
+        (record / "blobs/0").symlink_to(outside / "secret.ts")
+
+    corruptions = {
+        "tag": (rename_tag, "another worktree"),
+        "identity": (lambda r, d: d["invocation"].__setitem__(4, "toolu_other"), "does not belong"),
+        "key": (lambda r, d: d.__setitem__("key", "0" * 32), "does not belong"),
+        "blob name": (lambda r, d: d["kept"].__setitem__("dirty.ts", "../../secret"), "damaged"),
+        "blob link": (link_blob, "damaged"),
+        "parent path": (lambda r, d: d["clean"].__setitem__("../secret.ts", "0" * 40), "damaged"),
+        "absolute path": (lambda r, d: d["kept"].__setitem__(str(outside / "secret.ts"), "0"), "damaged"),
+        "root type": (lambda r, d: d.__setitem__("root", ["x"]), "another worktree"),
+    }
+    for name, (corrupt, reason) in corruptions.items():
+        state = Path(tempfile.mkdtemp())
+        box = repo({"a.ts": "export const a = 1;\n"})
+        (box / "dirty.ts").write_text("export const d = 1;\n")
+        payload = shell_payload(box, "true")
+        assert hook("pre", payload, box, state).returncode == 0
+        record = the_record(state, payload)
+        data = json.loads((record / "manifest.json").read_text())
+        corrupt(record, data)
+        if name not in ("tag", "blob link"):
+            (record / "manifest.json").write_text(json.dumps(data))
+        (box / "dirty.ts").write_text("console.log(1);\n")
+        proc, touched = audited_hook("post", {**payload, "hook_event_name": "PostToolUse"}, box, outside, state)
+        kind, said = outcome(proc)
+        assert kind == "context" and "not checked" in said and reason in said, (name, said)
+        assert touched == [], (name, touched)
+
+
+def test_no_state_operation_follows_a_link_out_of_the_state_directory():
+    from clean_code.snapshot import record_key
+    outside = Path(tempfile.mkdtemp())
+    (outside / "target.ts").write_text("do not touch\n")
+    (outside / "dir").mkdir()
+    (outside / "dir/keep.ts").write_text("keep\n")
+    old = 1_600_000_000
+    os.utime(outside / "target.ts", (old, old))
+    target_before, dir_before = untouched(outside / "target.ts"), untouched(outside / "dir/keep.ts")
+    state = Path(tempfile.mkdtemp())
+    box = repo({"a.ts": "export const a = 1;\n"})
+    (box / "dirty.ts").write_text("export const d = 1;\n")
+    denied = shell_payload(box, "never ran")
+    assert hook("pre", denied, box, state).returncode == 0
+    records = state / "clean-code-snapshots"
+    key = record_key(denied)
+    (records / f".tomb.{key}").symlink_to(outside / "target.ts")
+    hostile = {".tmp.evil": outside / "target.ts", f".claimed.{key}.x": outside / "dir", "garbage-link": outside / "dir",
+               f".shared.{'1' * 32}": outside / "target.ts"}
+    for name, target in hostile.items():
+        (records / name).symlink_to(target)
+        if os.utime in os.supports_follow_symlinks:
+            os.utime(records / name, (old, old), follow_symlinks=False)
+    expire(state)
+    proc, touched = audited_hook("pre", shell_payload(box, "true"), box, outside, state)
+    assert proc.returncode == 0 and proc.stderr == "", proc
+    assert touched == [], touched
+    assert untouched(outside / "target.ts") == target_before and untouched(outside / "dir/keep.ts") == dir_before
+    tomb = os.lstat(records / f".tomb.{key}")
+    assert not stat_is_link(tomb), "the tombstone replaced the link instead of touching its target"
+    left = set(os.listdir(records))
+    if os.utime in os.supports_follow_symlinks:
+        assert not left & {".tmp.evil", f".claimed.{key}.x", "garbage-link"}, left
+    (records / f"{'a' * 16}.1.{int(time.time()) + 600}.{key}").symlink_to(outside / "dir")
+    proc, touched = audited_hook("post", {**denied, "hook_event_name": "PostToolUse"}, box, outside, state)
+    kind, said = outcome(proc)
+    assert kind == "context" and "not checked" in said and touched == [], (said, touched)
+    assert untouched(outside / "dir/keep.ts") == dir_before
+
+
+def stat_is_link(info: os.stat_result) -> bool:
+    import stat as stat_module
+    return stat_module.S_ISLNK(info.st_mode)
+
+
+def corrupted_post(box: Path, watch: Path, corrupt, prepare=None) -> tuple:
+    """A real pre snapshot, the manifest corrupted by hand, then the post run under the audit shim."""
+    state = Path(tempfile.mkdtemp())
+    payload = shell_payload(box, "true")
+    assert hook("pre", payload, box, state).returncode == 0
+    manifest = the_record(state, payload) / "manifest.json"
+    data = json.loads(manifest.read_text())
+    corrupt(data)
+    manifest.write_text(json.dumps(data))
+    if prepare:
+        prepare()
+    proc, touched = audited_hook("post", {**payload, "hook_event_name": "PostToolUse"}, box, watch, state)
+    return outcome(proc), touched
+
+
+def test_a_manifest_path_that_ends_in_a_link_is_never_followed():
+    b = repo({"secret.ts": "export const s = 1;\n"})
+    (b / "secret.ts").write_text("console.log('dirty in b');\n")
+    a = repo({"a.ts": "export const a = 1;\n", "sub/x.ts": "export const x = 1;\n"})
+    (a / "escape").symlink_to(b)
+    (a / "inlink").symlink_to(a / "sub")
+    before = untouched(b / "secret.ts")
+    for name in ("escape", "inlink"):
+        (kind_, said), touched = corrupted_post(a, b, lambda d: d["inner"].__setitem__(name, "a" * 64))
+        assert kind_ == "context" and "damaged (inner)" in said, (name, said)
+        assert touched == [], (name, touched)
+        assert str(b) not in said and os.path.realpath(b) not in said
+    assert untouched(b / "secret.ts") == before
+    nested = repo({"a.ts": "export const a = 1;\n"})
+    repo({"inner.ts": "export const i = 1;\n"}, nested / "inner")
+    kind_, said = shell(nested, "printf 'console.log(1);\\n' >> inner/inner.ts")
+    assert kind_ == "context" and "inner not checked" in said, "a real nested repository is still compared"
+
+
+def test_a_file_field_whose_path_is_now_a_link_is_rejected_unread():
+    outside = Path(tempfile.mkdtemp())
+    (outside / "target.ts").write_text("console.log('outside');\n")
+    values = {"clean": "0" * 40, "kept": "0", "digests": "a" * 64}
+    for field, value in values.items():
+        for target in (outside / "target.ts", "a.ts"):
+            box = repo({"a.ts": "export const a = 1;\n"})
+            (box / "dirty.ts").write_text("export const d = 1;\n")
+            (box / "evil.ts").symlink_to(target)
+
+            def corrupt(data, field=field, value=value):
+                data[field]["evil.ts"] = value
+                data["ids"]["evil.ts"] = [1, 2, None]
+
+            (kind_, said), touched = corrupted_post(box, outside, corrupt)
+            assert kind_ == "context" and f"damaged ({field})" in said, (field, target, said)
+            assert touched == [], (field, target, touched)
+
+
+def test_a_link_the_snapshot_recorded_is_inspected_without_reading_its_target():
+    outside = Path(tempfile.mkdtemp())
+    (outside / "target.ts").write_text("export const t = 1;\n")
+    box = Path(tempfile.mkdtemp()) / "repo"
+    box.mkdir()
+    (box / "link.ts").symlink_to(outside / "target.ts")
+    repo({"a.ts": "export const a = 1;\n"}, box)
+    state = Path(tempfile.mkdtemp())
+    payload = shell_payload(box, "append through the link")
+    assert hook("pre", payload, box, state).returncode == 0
+    with open(box / "link.ts", "a") as handle:
+        handle.write("console.log(1);\n")
+    proc, touched = audited_hook("post", {**payload, "hook_event_name": "PostToolUse"}, box, outside, state)
+    kind_, said = outcome(proc)
+    assert kind_ == "context" and "link.ts not checked" in said and touched == [], (said, touched)
+
+
+def test_a_link_whose_target_predates_1970_is_a_valid_unchanged_link():
+    from clean_code.snapshot import is_link_signature, outside_link
+    outside = Path(tempfile.mkdtemp()) / "old.ts"
+    outside.write_text("export const old = 1;\n")
+    os.utime(outside, ns=(0, -1_000_000_000))
+    if os.stat(outside).st_mtime_ns != -1_000_000_000:
+        print("  skipped: this filesystem cannot keep a time before 1970")
+        return
+    box = Path(tempfile.mkdtemp()) / "repo"
+    box.mkdir()
+    (box / "link.ts").symlink_to(outside)
+    repo({"a.ts": "export const a = 1;\n"}, box)
+    written = outside_link(Path(os.path.realpath(box)), "link.ts")
+    assert written[1] == -1_000_000_000 and is_link_signature(json.loads(json.dumps(written))), written
+    state = Path(tempfile.mkdtemp())
+    payload = shell_payload(box, "true")
+    assert hook("pre", payload, box, state).returncode == 0
+    before = untouched(outside)
+    proc, touched = audited_hook("post", {**payload, "hook_event_name": "PostToolUse"}, box, outside.parent, state)
+    assert outcome(proc) == ("silent", ""), proc
+    assert touched == [] and untouched(outside) == before
+
+
+def test_link_and_identity_signatures_have_exactly_the_shape_the_writer_gives():
+    from clean_code.snapshot import identity, is_identity, is_link_signature, outside_link
+    root = Path(tempfile.mkdtemp())
+    outside = Path(tempfile.mkdtemp()) / "t.ts"
+    outside.write_text("x\n")
+    (root / "l.ts").symlink_to(outside)
+    (root / "gone.ts").symlink_to(outside.with_name("missing.ts"))
+    written = [outside_link(Path(os.path.realpath(root)), name) for name in ("l.ts", "gone.ts")]
+    for signature in written + [None]:
+        assert is_link_signature(json.loads(json.dumps(signature))), signature
+    for bad in ([], [1], [1, 2], [1, 2, 3, 4], ["1", 2, 3], [True, 2, 3], [1, True, 3], [1.0, 2, 3], [-1, 2, 3],
+                [1, 2, -1], ["missing", 1], {}, "x", 7):
+        assert not is_link_signature(bad), bad
+    assert is_link_signature([1, -1, 3]) and is_link_signature([0, 0, 0]), "only the time may be negative"
+    assert is_identity(json.loads(json.dumps(identity(os.lstat(outside)))))
+    for bad in ([], [1, 2], [1, 2, None, 4], [True, 2, None], [1, 2, "x"], [1, 2, 3], ["1", 2, None]):
+        assert not is_identity(bad), bad
+
+
+def test_a_malformed_manifest_field_fails_before_the_worktree_is_compared():
+    import tempfile as tempfile_module
+    from clean_code import snapshot
+    state = Path(tempfile.mkdtemp())
+    box = repo({"a.ts": "export const a = 1;\n"})
+
+    class Compared(Exception):
+        pass
+
+    def refuse(record):
+        raise Compared
+
+    saved = (snapshot.compare, tempfile_module.tempdir)
+    snapshot.compare = refuse
+    try:
+        for links, expected in (([], "damaged (links)"), ([1, 2], "damaged (links)"), ([1, 2, 3, 4], "damaged (links)"),
+                                (["1", 2, 3], "damaged (links)"), ([True, 2, 3], "damaged (links)"), ([1, 2, 3], None)):
+            payload = shell_payload(box, "true")
+            tempfile_module.tempdir = None
+            assert hook("pre", payload, box, state).returncode == 0
+            manifest = the_record(state, payload) / "manifest.json"
+            data = json.loads(manifest.read_text())
+            data["links"]["a.ts"] = links
+            manifest.write_text(json.dumps(data))
+            tempfile_module.tempdir = str(state)
+            try:
+                snapshot.changes({**payload, "hook_event_name": "PostToolUse"})
+                raise AssertionError(f"{links} reached neither the boundary nor comparison")
+            except snapshot.Unsupported as exc:
+                assert expected and expected in str(exc), (links, exc)
+            except Compared:
+                assert expected is None, f"{links} reached comparison"
+    finally:
+        snapshot.compare, tempfile_module.tempdir = saved
+    (kind_, said), touched = corrupted_post(box, box, lambda d: d["links"].__setitem__("a.ts", []))
+    assert kind_ == "context" and "damaged (links)" in said, said
+
+
+def test_a_write_never_reads_outside_the_project():
+    import builtins
+    import io
+    from clean_code import hooks as hooks_module
+    project = Path(tempfile.mkdtemp())
+    outside = Path(tempfile.mkdtemp()) / "typed.ts"
+    typed = "export function load(id: string, strict: boolean): Row {\n  return rows[id];\n}\n"
+    outside.write_text(typed)
+    (project / "inside.ts").write_text(typed)
+    (project / "out-link.ts").symlink_to(outside)
+    (project / "in-link.ts").symlink_to(project / "inside.ts")
+    untyped = typed.replace("id: string, strict: boolean): Row", "id, strict)")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"read {args[:1]}")
+
+    saved = (hooks_module.read_lines, builtins.open, io.open, Path.read_text, Path.read_bytes)
+    hooks_module.read_lines = builtins.open = io.open = Path.read_text = Path.read_bytes = refuse
+    try:
+        for target in (outside, project / "out-link.ts", project / "in-link.ts"):
+            write = {"tool_name": "Write", "tool_input": {"file_path": str(target), "content": untyped}}
+            assert cc.pre_check(write, project) is None, target
+    finally:
+        hooks_module.read_lines, builtins.open, io.open, Path.read_text, Path.read_bytes = saved
+    write = {"tool_name": "Write", "tool_input": {"file_path": str(project / "inside.ts"), "content": untyped}}
+    assert "removes type annotations" in cc.pre_check(write, project)
+    loosen = {"tool_name": "Write", "tool_input": {"file_path": str(outside.with_name("tsconfig.json")),
+                                                  "content": json.dumps({"strict": False})}}
+    assert "strict mode" in cc.pre_check(loosen, project), "new content is judged even where old content is not read"
+
+
+def expire(state: Path) -> None:
+    """Move every live record's lease into the past, as if its command had run out of time."""
+    from clean_code.snapshot import RECORD_NAME
+    records = state / "clean-code-snapshots"
+    for entry in os.listdir(records):
+        m = RECORD_NAME.match(entry)
+        if m:
+            past = int(time.time()) - 60
+            os.rename(records / entry, records / f"{m.group(1)}.{past - 600}.{past}.{m.group(4)}")
+
+
+def test_a_denied_command_stops_blocking_the_worktree_once_its_lease_ends():
+    state = Path(tempfile.mkdtemp())
+    box = repo({"a.ts": "export const a = 1;\n"})
+    denied = shell_payload(box, "never ran")
+    assert hook("pre", denied, box, state).returncode == 0
+    during = shell_payload(box, "writes")
+    assert hook("pre", during, box, state).returncode == 0
+    (box / "during.ts").write_text("console.log(1);\n")
+    kind, said = finish(during, box, state=state)
+    assert kind == "context" and "at the same time" in said, "a live lease still blocks attribution"
+    expire(state)
+    after = shell_payload(box, "writes")
+    assert hook("pre", after, box, state).returncode == 0
+    records = os.listdir(state / "clean-code-snapshots")
+    assert [e for e in records if e.startswith(".tomb.")] and not [e for e in records if not e.startswith(".")][1:]
+    (box / "after.ts").write_text("console.log(2);\n")
+    kind, said = finish(after, box, state=state)
+    assert kind == "report" and "after.ts" in said and f"{DEBUG}: L1" in said, said
+    kind, said = finish(denied, box, state=state)
+    assert kind == "context" and "expired" in said, said
+    kind, said = finish(denied, box, state=state)
+    assert kind == "context" and "not checked" in said, "a second late post is still not clean"
+
+
+def test_expired_and_old_state_stays_bounded_and_leaves_room_for_new_commands():
+    from clean_code.snapshot import TOMBSTONE_LIMIT
+    state = Path(tempfile.mkdtemp())
+    records = state / "clean-code-snapshots"
+    records.mkdir(mode=0o700)
+    past = int(time.time()) - 60
+    for i in range(70):
+        stale = records / f"{'ab' * 8}.{past - 600}.{past}.{i:032x}"
+        (stale / "blobs").mkdir(parents=True)
+        (stale / "blobs/0").write_bytes(b"x" * 4096)
+    old = time.time() - 2 * 24 * 3600
+    for i in range(TOMBSTONE_LIMIT + 100):
+        tomb = records / f".tomb.{i:032x}"
+        tomb.touch()
+        if i < 50:
+            os.utime(tomb, (old, old))
+    box = repo({"a.ts": "export const a = 1;\n"})
+    kind, said = shell_with_state(box, "printf 'console.log(1);\\n' >> a.ts", state)
+    assert kind == "report" and f"{DEBUG}: L2" in said, said
+    left = os.listdir(records)
+    assert not [e for e in left if not e.startswith(".")], "expired records hold no baseline"
+    assert len([e for e in left if e.startswith(".tomb.")]) <= TOMBSTONE_LIMIT
+
+
+def shell_with_state(box: Path, command: str, state: Path) -> tuple:
+    payload = shell_payload(box, command)
+    assert hook("pre", payload, box, state).returncode == 0
+    ran = subprocess.run(command, shell=True, cwd=str(box), capture_output=True)
+    return finish(payload, box, ran.returncode, state)
+
+
+def test_malformed_snapshot_state_never_crashes_and_never_passes():
+    state = Path(tempfile.mkdtemp())
+    records = state / "clean-code-snapshots"
+    records.mkdir(mode=0o700)
+    (records / "garbage").write_text("x")
+    (records / "a.b").write_text("x")
+    (records / "0123456789abcdef.x.y.z").mkdir()
+    (records / "weird dir").mkdir()
+    box = repo({"a.ts": "export const a = 1;\n"})
+    kind, said = shell_with_state(box, "printf 'console.log(1);\\n' >> a.ts", state)
+    assert kind == "report" and f"{DEBUG}: L2" in said, said
+    for damage in ("manifest", "blob"):
+        (box / "dirty.ts").write_text("export const d = 1;\n")
+        payload = shell_payload(box, "damaged")
+        assert hook("pre", payload, box, state).returncode == 0
+        [record] = [records / e for e in os.listdir(records) if e.endswith(payload_key(payload))]
+        if damage == "manifest":
+            (record / "manifest.json").write_text('{"clean": ')
+        else:
+            for blob in (record / "blobs").iterdir():
+                blob.unlink()
+        (box / "dirty.ts").write_text("export const d = 2;\n")
+        kind, said = finish(payload, box, state=state)
+        assert kind == "context" and "not checked" in said, (damage, said)
+
+
+def payload_key(payload: dict) -> str:
+    from clean_code.snapshot import record_key
+    return record_key(payload)
+
+
+def test_codex_keeps_the_snapshot_of_the_original_exec_through_write_stdin():
+    box = repo({"a.ts": "export const a = 1;\n"})
+    start = shell_payload(box, "python3 -i", turn_id="turn-1")
+    assert hook("pre", start, box).returncode == 0
+    records = sorted(os.listdir(SHELL_STATE / "clean-code-snapshots"))
+    stdin = {**start, "tool_name": "write_stdin", "tool_use_id": "toolu_stdin", "tool_input": {"chars": "x\n"}}
+    assert hook("pre", stdin, box).returncode == 0
+    assert sorted(os.listdir(SHELL_STATE / "clean-code-snapshots")) == records
+    (box / "a.ts").write_text("export const a = 1;\nconsole.log(1);\n")
+    kind, said = finish(start, box, 1)
+    assert kind == "report" and f"{DEBUG}: L2" in said, said
+
+
+def test_snapshot_state_is_private_and_bounded():
+    state = Path(tempfile.mkdtemp())
+    box = repo({"a.ts": "export const a = 1;\n"})
+    payload = shell_payload(box, "true")
+    assert hook("pre", payload, box, state).returncode == 0
+    records = state / "clean-code-snapshots"
+    assert records.stat().st_mode & 0o777 == 0o700
+    past = int(time.time()) - 3 * 3600
+    stale = records / f"{'de' * 8}.{past}.{past + 1}.0123456789abcdef0123456789abcdef"
+    stale.mkdir()
+    assert hook("pre", shell_payload(box, "true"), box, state).returncode == 0
+    assert not stale.exists() and (records / ".tomb.0123456789abcdef0123456789abcdef").exists()
+    assert finish(payload, box, state=state) == ("silent", "")
+    assert not [e for e in os.listdir(records) if e.endswith(payload["tool_use_id"])]
+
+
+def test_the_installer_covers_shell_writes_for_both_agents_and_migrates_old_matchers():
+    home = fresh_home()
+    settings = home / ".claude/settings.json"
+    check = home / ".clean-code/clean_check.py"
+    old = {"theme": "dark", "hooks": {
+        "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|Bash", "hooks": [{"type": "command", "command": f'python3 "{check}" pre'}]},
+                       {"matcher": "Bash", "hooks": [{"type": "command", "command": "somebody-elses-hook"}]}],
+        "PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": f'python3 "{check}" post'}]}],
+        "PostToolUseFailure": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "somebody-elses-failure"}]}]}}
+    settings.write_text(json.dumps(old))
+    for _ in range(2):
+        assert run_installer(home, "--no-parser")[0] == 0
+    matchers = {event: [g["matcher"] for g in ours(home, settings, event)]
+                for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure")}
+    assert matchers == {"PreToolUse": ["Edit|Write|Bash|PowerShell"], "PostToolUse": ["Edit|Write|Bash|PowerShell"],
+                        "PostToolUseFailure": ["Bash|PowerShell"]}, matchers
+    codex = home / ".codex/hooks.json"
+    assert [g["matcher"] for g in ours(home, codex, "PostToolUse")] == ["Bash|apply_patch"]
+    assert [g["matcher"] for g in ours(home, codex, "PreToolUse")] == ["Bash|apply_patch"]
+    assert "PostToolUseFailure" not in json.loads(codex.read_text())["hooks"]
+    foreign = [g["hooks"][0]["command"] for g in hook_groups(settings, "PostToolUseFailure") if not group_is_ours(g, check)]
+    assert foreign == ["somebody-elses-failure"] and json.loads(settings.read_text())["theme"] == "dark"
+    [failure] = ours(home, settings, "PostToolUseFailure")
+    box = repo({"a.ts": "export const a = 1;\n"})
+    payload = shell_payload(box, "printf 'console.log(1);\\n' >> a.ts; exit 3")
+    run = lambda mode, body: subprocess.run(failure["hooks"][0]["command"].replace(" post", f" {mode}"), shell=True,
+                                            input=json.dumps(body), capture_output=True, text=True, cwd=str(box),
+                                            env={"PATH": os.environ["PATH"], "TMPDIR": str(SHELL_STATE)})
+    assert run("pre", payload).returncode == 0
+    subprocess.run(payload["tool_input"]["command"], shell=True, cwd=str(box))
+    proc = run("post", {**payload, "hook_event_name": "PostToolUseFailure"})
+    assert proc.returncode == 2 and f"{DEBUG}: L2" in proc.stderr, proc
+    assert run_installer(home, "--uninstall")[0] == 0
+    assert all(not ours(home, settings, e) for e in ("PreToolUse", "PostToolUse", "PostToolUseFailure"))
+    assert [g["hooks"][0]["command"] for g in hook_groups(settings, "PostToolUseFailure")] == ["somebody-elses-failure"]
+
+
+def group_is_ours(group, check: Path) -> bool:
+    from clean_code.install import group_is_ours as owned
+    return owned(group, check)
 
 
 if __name__ == "__main__":
