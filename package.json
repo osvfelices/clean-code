@@ -23,6 +23,6 @@
   "scripts": {
     "test": "python3 core/tests/test_clean_check.py"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true
 }
