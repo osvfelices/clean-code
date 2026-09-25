@@ -1646,6 +1646,8 @@ def shell(box: Path, command: str, **extra) -> tuple:
 
 
 PY = json.dumps(sys.executable)
+# Only a birth time kept with the inode proves a file was moved; Linux keeps none.
+BIRTHTIME = hasattr(os.lstat(__file__), "st_birthtime")
 
 
 def test_the_structured_pre_gaps_are_closed():
@@ -1702,7 +1704,10 @@ def test_a_rename_adds_nothing_and_a_rename_with_an_edit_adds_only_the_edit():
     box = repo({"legacy.ts": "console.log('legacy');\nexport const a = 1;\n", "old.ts": "console.log('old');\nexport const o = 1;\n"})
     assert shell(box, "mv legacy.ts moved.ts") == ("silent", "")
     kind, said = shell(box, "mv old.ts renamed.ts && printf 'console.log(1);\\n' >> renamed.ts")
-    assert kind == "report" and f"{DEBUG}: L3" in said and "L1" not in said, said
+    if BIRTHTIME:
+        assert kind == "report" and f"{DEBUG}: L3" in said and "L1" not in said, said
+    else:
+        assert kind == "context" and "renamed.ts not checked" in said, "an inode alone proves no move"
 
 
 def test_a_multi_file_command_reports_only_the_file_that_has_the_defect():
@@ -1855,12 +1860,19 @@ def test_a_moved_file_is_diffed_against_itself_however_heavily_it_was_edited():
                "p.write_text(first + chr(10) + ''.join(f'export const w{i} = {i};' + chr(10) for i in range(20)) "
                "+ 'console.log(1);' + chr(10))")
     kind, said = shell(box, f"mv legacy.ts moved.ts && {PY} -c \"{rewrite}\"")
-    assert kind == "report" and f"{DEBUG}: L22" in said and "L1," not in said and ": L1\n" not in said, said
+    if BIRTHTIME:
+        assert kind == "report" and f"{DEBUG}: L22" in said and "L1," not in said and ": L1\n" not in said, said
+    else:
+        assert kind == "context" and "moved.ts not checked" in said, "an inode alone proves no move"
 
 
 def test_a_file_moved_over_another_is_diffed_against_where_it_came_from():
     box = repo({"a.ts": "console.log('legacy');\nexport const a = 1;\n", "b.ts": "export const b = 1;\n"})
-    assert shell(box, "mv a.ts b.ts") == ("silent", "")
+    kind, said = shell(box, "mv a.ts b.ts")
+    if BIRTHTIME:
+        assert (kind, said) == ("silent", ""), said
+    else:
+        assert kind == "context" and "b.ts not checked" in said and "moved over it" in said, said
 
 
 def test_copy_then_delete_of_identical_content_is_a_rename():
@@ -1915,6 +1927,65 @@ def test_an_unproven_rename_is_not_checked_and_its_siblings_still_are():
     assert kind == "report" and "sibling.ts" in said and f"{DEBUG}: L2" in said, said
     assert "x2.ts not checked" in said and "may have become it" in said, said
     assert "c.ts not checked" in said and "more than one deleted file" in said, said
+
+
+WITHOUT_BIRTHTIME = r'''
+import os, runpy, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from clean_code import snapshot
+real = snapshot.identity
+snapshot.identity = lambda info: real(info)[:2] + [None]
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+
+
+def shell_without_birthtime(box: Path, command: str) -> tuple:
+    """The real pre and post hooks around a real command, on a filesystem that keeps no birth time, as Linux."""
+    shim = Path(tempfile.mkdtemp()) / "no_birthtime.py"
+    shim.write_text(WITHOUT_BIRTHTIME)
+    payload = shell_payload(box, command)
+    env = {"CLAUDE_PROJECT_DIR": str(box), "PATH": os.environ["PATH"], "TMPDIR": str(SHELL_STATE)}
+
+    def run(mode: str, body: dict) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(shim), str(ENTRY), mode], input=json.dumps(body), capture_output=True,
+                              text=True, env=env, cwd=str(box))
+
+    assert run("pre", payload).returncode == 0
+    subprocess.run(command, shell=True, cwd=str(box), capture_output=True)
+    return outcome(run("post", {**payload, "hook_event_name": "PostToolUse"}))
+
+
+def test_without_birth_times_only_content_proves_a_rename_and_same_path_edits_are_checked():
+    legacy = "console.log('legacy');\nexport const a = 1;\n"
+    box = repo({"a.ts": legacy, "b.ts": "export const b = 1;\n", "c.ts": legacy.replace("a = 1", "c = 1"),
+                "d.ts": "export const d = 1;\n", "e.ts": "export const d = 1;\n", "f.ts": "export const f: number = 1;\n"})
+    assert shell_without_birthtime(box, "mv a.ts moved.ts") == ("silent", ""), "identical content is a pure rename"
+    kind, said = shell_without_birthtime(box, "mv c.ts c2.ts && printf 'console.log(1);\\n' >> c2.ts")
+    assert kind == "context" and "c2.ts not checked" in said, "a rename with an edit is unproven"
+    kind, said = shell_without_birthtime(box, "mv moved.ts b.ts")
+    assert kind == "context" and "b.ts not checked" in said and "moved over it" in said, said
+    kind, said = shell_without_birthtime(box, "cp d.ts copy.ts && rm d.ts e.ts")
+    assert kind == "context" and "copy.ts not checked" in said and "more than one deleted file" in said, said
+    kind, said = shell_without_birthtime(box, "printf 'console.log(2);\\n' > genuine.ts")
+    assert kind == "report" and "genuine.ts" in said and f"{DEBUG}: L1" in said, "a new file beside no deletion is new"
+    kind, said = shell_without_birthtime(box, "sed -i.orig 's/: number = 1/ = v as any/' f.ts && rm f.ts.orig"
+                                              " && printf 'console.log(3);\\n' >> f.ts")
+    assert kind == "report" and "f.ts" in said and f"{WEAK}: L1" in said and f"{DEBUG}: L2" in said, said
+
+
+def test_an_inode_a_deleted_file_freed_proves_nothing_without_a_birth_time():
+    from clean_code.snapshot import Content, attributed
+    old, new = b"console.log('legacy');\n", b"export const fresh = 1;\n"
+    reused = [1, 42, None]
+    [arrival] = attributed({"x.ts": Content(old, None, reused)}, {}, {"c.ts": Content(new, None, reused)})[:1]
+    assert arrival.path == "c.ts" and arrival.doubt, "a reused inode is not a move"
+    [overwritten] = attributed({"x.ts": Content(old, None, reused)},
+                               {"b.ts": (Content(new, None, [1, 7, None]), Content(new + old, None, reused))}, {})[:1]
+    assert overwritten.path == "b.ts" and "moved over it" in overwritten.doubt
+    kept = [1, 42, 1_700_000_000.5]
+    [moved] = attributed({"x.ts": Content(old, None, kept)}, {}, {"c.ts": Content(old + new, None, kept)})
+    assert moved.path == "c.ts" and moved.before == old and not moved.doubt, "with a birth time the move is proven"
 
 
 def test_a_new_file_beside_an_unpaired_deletion_is_not_checked_whatever_it_holds():

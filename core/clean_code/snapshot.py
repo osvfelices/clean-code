@@ -547,16 +547,22 @@ def attributed(gone: dict[str, Content], stayed: dict[str, tuple[Content, Conten
                arrived: dict[str, Content]) -> list[Change]:
     """Each changed path with the content it came from, proven by inode or by identical bytes, never by likeness.
 
-    A file that now sits on a deleted file's inode is that file moved. A new file identical to exactly one
-    deleted file, and it alone, is a pure rename. While any deleted file stays unpaired, a new file without
-    proof may be that file renamed and rewritten, so it is not checked; only with no such deletion is it new.
+    A file that now sits on a deleted file's inode, with the same birth time, is that file moved. Where the
+    filesystem keeps no birth time (Linux), the inode alone proves nothing: a new file can be given the one a
+    deleted file just freed. A new file identical to exactly one deleted file, and it alone, is a pure rename.
+    While any deleted file stays unpaired, a new file without proof may be that file renamed and rewritten, so
+    it is not checked; only with no such deletion is it new.
     """
-    moved = {tuple(content.ident): path for path, content in gone.items() if content.ident}
+    moved = {tuple(content.ident): path for path, content in gone.items() if content.ident and content.ident[2] is not None}
+    reusable = {tuple(content.ident) for content in gone.values() if content.ident and content.ident[2] is None}
     out: list[Change] = []
     for path, (was, now) in stayed.items():
-        origin = moved.get(tuple(now.ident)) if now.ident != was.ident else None
+        new_inode = now.ident != was.ident
+        origin = moved.get(tuple(now.ident)) if new_inode else None
         if origin in gone:
             out.append(changed(path, gone.pop(origin), now))
+        elif new_inode and tuple(now.ident) in reusable:
+            out.append(Change(path, None, None, "a deleted file may have been moved over it, which this filesystem cannot prove"))
         elif was.same_as(now) is not True:
             out.append(changed(path, was, now))
     unproven: dict[str, Content] = {}
